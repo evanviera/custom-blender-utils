@@ -6,6 +6,10 @@ from bpy_extras.io_utils import axis_conversion
 
 transformations_clipboard = {}
 
+def clear_transformations():
+    global transformations_clipboard
+    transformations_clipboard = {}
+
 def copy_transformations(obj):
     global transformations_clipboard
     transformations = {

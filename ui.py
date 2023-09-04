@@ -9,6 +9,7 @@ class UtilitiesMenu(bpy.types.Menu):
         layout = self.layout
         layout.operator("object.copy_transformations", text="Copy Transformations")
         layout.operator("object.paste_transformations", text="Paste Transformations")
+        layout.operator("object.clear_transformations_clipboard", text="Clear Transformations")
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
 

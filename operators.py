@@ -23,6 +23,14 @@ class PasteTransformationsOperator(bpy.types.Operator):
             fn.paste_transformations(obj)
         return {'FINISHED'}
 
+class ClearTransformationsClipboardOperator(bpy.types.Operator):
+    bl_idname = "object.clear_transformations_clipboard"
+    bl_label = "Clear Transformations Clipboard"
+
+    def execute(self, context):
+        fn.clear_transformations()
+        return {'FINISHED'}
+
 class SetOriginToBottomCenterOperator(bpy.types.Operator):
     bl_idname = "object.set_origin_to_bottom_center"
     bl_label = "Set Origin to Bottom Center"
@@ -88,6 +96,7 @@ class RemoveDuplicateMaterialsOperator(bpy.types.Operator):
 classes = [
     CopyTransformationsOperator,
     PasteTransformationsOperator,
+    ClearTransformationsClipboardOperator,
     SetOriginToBottomCenterOperator,
     RemoveDuplicateMaterialsOperator,
 ]
