@@ -5,6 +5,21 @@ from bpy_extras.io_utils import axis_conversion
 
 from . import functions as fn
 
+class DistanceMeasureOperator(bpy.types.Operator):
+    bl_idname = "object.measure_surface_point"
+    bl_label = "Distance Measurement Modal Operator"
+
+    def modal(self, context, event):
+        if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
+            fn.handle_mouse_click(context, event, self)
+            return {'FINISHED'}
+
+        return {'PASS_THROUGH'}
+
+    def invoke(self, context, event):
+        context.window_manager.modal_handler_add(self)
+        return {'RUNNING_MODAL'}
+
 class CopyTransformationsOperator(bpy.types.Operator):
     bl_idname = "object.copy_transformations"
     bl_label = "Copy Transformations"
@@ -94,6 +109,7 @@ class RemoveDuplicateMaterialsOperator(bpy.types.Operator):
 
 
 classes = [
+    DistanceMeasureOperator,
     CopyTransformationsOperator,
     PasteTransformationsOperator,
     ClearTransformationsClipboardOperator,

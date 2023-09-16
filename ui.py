@@ -7,6 +7,7 @@ class UtilitiesMenu(bpy.types.Menu):
 
     def draw(self, context):
         layout = self.layout
+        layout.operator("object.measure_surface_point", text="Measure Surface Point")
         layout.operator("object.copy_transformations", text="Copy Transformations")
         layout.operator("object.paste_transformations", text="Paste Transformations")
         layout.operator("object.clear_transformations_clipboard", text="Clear Transformations")
@@ -20,6 +21,7 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
 
     def draw(self, context):
         pie = self.layout.menu_pie()
+        pie.operator("object.measure_surface_point", text="Measure Surface Point")
         pie.operator("object.copy_transformations", text="Copy Transformations")
         pie.operator("object.paste_transformations", text="Paste Transformations")
         pie.operator("object.clear_transformations_clipboard", text="Clear Transformations")

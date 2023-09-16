@@ -2,7 +2,40 @@ import bpy
 import json
 from mathutils import Vector
 from bpy_extras.io_utils import axis_conversion
+from bpy_extras import view3d_utils
 
+def measure_distance_from_camera_to_location(location):
+    cam = bpy.context.scene.camera
+    if not cam:
+        print("No active camera")
+        return None
+    
+    cam_loc = cam.matrix_world.to_translation()
+    return (cam_loc - location).length
+
+def handle_mouse_click(context, event, operator):
+    x, y = event.mouse_region_x, event.mouse_region_y
+    region = context.region
+    rv3d = context.space_data.region_3d if context.space_data.type == 'VIEW_3D' else None
+
+    if not rv3d:
+        print("Not in 3D view context")
+        return
+
+    coord = x, y
+    view_vector = view3d_utils.region_2d_to_vector_3d(region, rv3d, coord)
+    view_loc = view3d_utils.region_2d_to_origin_3d(region, rv3d, coord)
+    depsgraph = context.evaluated_depsgraph_get()
+    result, location, _, _, _, _ = context.scene.ray_cast(depsgraph, view_loc, view_vector)
+
+    if result:
+        distance = measure_distance_from_camera_to_location(location)
+        if distance:
+            print(f"Distance: {distance:.2f}")
+            operator.report({'INFO'}, f"Distance: {distance:.2f}")
+            bpy.context.window_manager.clipboard = f"{distance:.2f}"
+    else:
+        print("No surface point clicked")
 
 transformations_clipboard = {}
 

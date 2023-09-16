@@ -3,7 +3,7 @@ import importlib
 bl_info = {
     "name": "Custom Utilities -- Packaged",
     "author": "Evan Viera",
-    "version": (0, 0, 13),
+    "version": (0, 0, 14),
     "blender": (2, 80, 0),
     "location": "Properties > World",
     "description": "Custom Utilities.",    
