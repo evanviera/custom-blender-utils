@@ -1,7 +1,7 @@
 import importlib
 
 bl_info = {
-    "name": "Custom Utilities -- Packaged",
+    "name": "Custom Utilities",
     "author": "Evan Viera",
     "version": (0, 0, 14),
     "blender": (2, 80, 0),
