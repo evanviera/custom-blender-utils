@@ -1,0 +1,4 @@
+run the following in command prompt
+
+
+mklink /D "E:\steam\steamapps\common\Blender\4.1\scripts\addons\CustomUtilities" "C:\Users\evan\Documents\GitHub\Blender\Addons\Custom-Utilities"
