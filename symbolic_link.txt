@@ -3,4 +3,4 @@ run the following in command prompt
 
 mklink /D "E:\steam\steamapps\common\Blender\4.1\scripts\addons\Custom-Utilities" "C:\Users\evan\Documents\GitHub\Blender\Addons\Custom-Utilities"
 
-mklink /D "C:\Users\evan\AppData\Roaming\Blender Foundation\Blender\4.2\scripts\addons\Custom-Utilities" "C:\Users\evan\Documents\GitHub\Blender\Addons\Custom-Utilities"
+mklink /D "C:\Users\evan\AppData\Roaming\Blender Foundation\Blender\4.4\scripts\addons\Custom-Utilities" "C:\Users\evan\Documents\GitHub\Blender\Addons\Custom-Utilities"
