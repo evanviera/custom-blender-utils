@@ -1,12 +1,17 @@
 import importlib
+"""Package entry for the Custom Utilities Blender addon.
+
+Handles module reloading during development and delegates to submodules for
+registration.
+"""
 
 bl_info = {
     "name": "Custom Utilities",
     "author": "Evan Viera",
-    "version": (0, 0, 18),
+    "version": (0, 1, 0),
     "blender": (2, 80, 0),
-    "location": "Properties > World",
-    "description": "Custom Utilities.",    
+    "location": "3D View > Header menu (Utilities) and C pie menu",
+    "description": "A curated set of everyday operators for modeling and scene management.",
     "warning": "",
     "wiki_url": "",
     "category": "Interface",

@@ -1,10 +1,20 @@
 import bpy
-import json
+"""Utility functions for the Custom Utilities Blender addon.
+
+This module encapsulates shared functionality used by operators, such as
+measuring distances, handling mouse clicks/raycast, transformation clipboard
+operations, and origin adjustments.
+"""
+
+from typing import Optional
 from mathutils import Vector
-from bpy_extras.io_utils import axis_conversion
 from bpy_extras import view3d_utils
 
-def measure_distance_from_camera_to_location(location):
+def measure_distance_from_camera_to_location(location: Vector) -> Optional[float]:
+    """Return the distance from the active camera to a world-space location.
+
+    Returns None if there is no active camera.
+    """
     cam = bpy.context.scene.camera
     if not cam:
         print("No active camera")
@@ -13,7 +23,8 @@ def measure_distance_from_camera_to_location(location):
     cam_loc = cam.matrix_world.to_translation()
     return (cam_loc - location).length
 
-def handle_mouse_click(context, event, operator):
+def handle_mouse_click(context: bpy.types.Context, event: bpy.types.Event, operator: bpy.types.Operator) -> None:
+    """Handle a 3D view click by raycasting and reporting camera-to-hit distance."""
     x, y = event.mouse_region_x, event.mouse_region_y
     region = context.region
     rv3d = context.space_data.region_3d if context.space_data.type == 'VIEW_3D' else None
@@ -39,11 +50,13 @@ def handle_mouse_click(context, event, operator):
 
 transformations_clipboard = {}
 
-def clear_transformations():
+def clear_transformations() -> None:
+    """Clear the internal transformations clipboard."""
     global transformations_clipboard
     transformations_clipboard = {}
 
-def copy_transformations(obj):
+def copy_transformations(obj: bpy.types.Object) -> None:
+    """Copy basic transforms (and type-specific data) from an object to the clipboard."""
     global transformations_clipboard
     transformations = {
         'location': tuple(obj.location),
@@ -68,7 +81,8 @@ def copy_transformations(obj):
         transformations_clipboard[obj.type] = []
     transformations_clipboard[obj.type].append(transformations)
 
-def paste_transformations(obj):
+def paste_transformations(obj: bpy.types.Object) -> None:
+    """Paste the earliest copied transformations for the object's type back onto it."""
     global transformations_clipboard
     obj_type = obj.type
     if obj_type in transformations_clipboard and transformations_clipboard[obj_type]:
@@ -87,8 +101,8 @@ def paste_transformations(obj):
             obj.data.clip_start = transformations['clip']['start']
             obj.data.clip_end = transformations['clip']['end']
 
-# Function to set the origin to the center bottom of the bounding box
-def set_origin_to_bottom_center(obj):
+def set_origin_to_bottom_center(obj: bpy.types.Object) -> None:
+    """Set the origin to the center of the object's bounding box bottom face."""
     # Calculate the center bottom position of the bounding box
     bbox_center_x = (obj.bound_box[0][0] + obj.bound_box[6][0]) / 2
     bbox_center_y = (obj.bound_box[0][1] + obj.bound_box[6][1]) / 2

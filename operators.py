@@ -1,7 +1,11 @@
 import bpy
-import json
-from mathutils import Vector
-from bpy_extras.io_utils import axis_conversion
+"""Operators for the Custom Utilities Blender addon.
+
+This module defines all operator classes exposed by the addon. Operators here
+focus on discrete actions such as measuring, copying/pasting transformations,
+cleaning materials, changing origins, and moving objects between collections.
+"""
+
 from bpy.props import StringProperty, EnumProperty
 
 from . import functions as fn
@@ -9,6 +13,7 @@ from . import functions as fn
 class DistanceMeasureOperator(bpy.types.Operator):
     bl_idname = "object.measure_surface_point"
     bl_label = "Distance Measurement Modal Operator"
+    bl_description = "Click in the 3D View to measure distance from active camera to the surface point"
 
     def modal(self, context, event):
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
@@ -24,6 +29,7 @@ class DistanceMeasureOperator(bpy.types.Operator):
 class CopyTransformationsOperator(bpy.types.Operator):
     bl_idname = "object.copy_transformations"
     bl_label = "Copy Transformations"
+    bl_description = "Copy location, rotation, and scale (plus type-specific data) to an internal clipboard"
 
     def execute(self, context):
         for obj in bpy.context.selected_objects:
@@ -33,6 +39,7 @@ class CopyTransformationsOperator(bpy.types.Operator):
 class PasteTransformationsOperator(bpy.types.Operator):
     bl_idname = "object.paste_transformations"
     bl_label = "Paste Transformations"
+    bl_description = "Paste transformations from the internal clipboard to selected objects"
 
     def execute(self, context):
         for obj in bpy.context.selected_objects:
@@ -42,6 +49,7 @@ class PasteTransformationsOperator(bpy.types.Operator):
 class ClearTransformationsClipboardOperator(bpy.types.Operator):
     bl_idname = "object.clear_transformations_clipboard"
     bl_label = "Clear Transformations Clipboard"
+    bl_description = "Clear the internal transformations clipboard"
 
     def execute(self, context):
         fn.clear_transformations()
@@ -50,6 +58,7 @@ class ClearTransformationsClipboardOperator(bpy.types.Operator):
 class SetOriginToBottomCenterOperator(bpy.types.Operator):
     bl_idname = "object.set_origin_to_bottom_center"
     bl_label = "Set Origin to Bottom Center"
+    bl_description = "Set the object's origin to the center of its bounding box bottom"
 
     def execute(self, context):
         for obj in bpy.context.selected_objects:
@@ -60,6 +69,7 @@ class SetOriginToBottomCenterOperator(bpy.types.Operator):
 class RemoveDuplicateMaterialsOperator(bpy.types.Operator):
     bl_idname = "object.remove_duplicate_materials"
     bl_label = "Remove Duplicate Materials"
+    bl_description = "Remove materials that are node-identical duplicates, remapping users to the original"
 
     def execute(self, context):
         def get_base_name(material_name):
@@ -113,6 +123,7 @@ class MoveSelectedToCollectionOperator(bpy.types.Operator):
     bl_idname = "object.move_selected_to_collection"
     bl_label = "Move Selected to Collection"
     bl_options = {"REGISTER", "UNDO"}
+    bl_description = "Move selected objects to a chosen collection with optional name filter"
 
     filter_text: StringProperty(
         name="Filter",

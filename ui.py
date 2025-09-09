@@ -1,9 +1,11 @@
 import bpy
+"""UI menus and keymaps for the Custom Utilities Blender addon."""
 
 # This class defines the dropdown menu
 class UtilitiesMenu(bpy.types.Menu):
     bl_label = "Utilities"
     bl_idname = "VIEW3D_MT_custom_menu"
+    bl_description = "Custom Utilities quick actions"
 
     def draw(self, context):
         layout = self.layout
@@ -20,6 +22,7 @@ class UtilitiesMenu(bpy.types.Menu):
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):
     bl_label = "Utilities Pie"
     bl_idname = "VIEW3D_MT_pie_utilities"
+    bl_description = "Custom Utilities pie menu"
 
     def draw(self, context):
         pie = self.layout.menu_pie()
