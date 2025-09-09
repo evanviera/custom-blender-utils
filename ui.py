@@ -13,6 +13,8 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.clear_transformations_clipboard", text="Clear Transformations")
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
+        layout.separator()
+        layout.operator("object.move_selected_to_collection", text="Move Selected to Collection")
 
 # Pie menu
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):
@@ -27,6 +29,7 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
         pie.operator("object.clear_transformations_clipboard", text="Clear Transformations")
         pie.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         pie.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
+        pie.operator("object.move_selected_to_collection", text="Move to Collection")
 
 # This function adds the menu to the toolbar
 def draw_func(self, context):
@@ -40,14 +43,35 @@ addon_keymaps = []
 def register():
     bpy.utils.register_class(UtilitiesMenu)
     bpy.utils.register_class(VIEW3D_MT_pie_utilities)
+    # Ensure the draw function is not appended twice
+    try:
+        bpy.types.VIEW3D_MT_editor_menus.remove(draw_func)
+    except Exception:
+        pass
     bpy.types.VIEW3D_MT_editor_menus.append(draw_func)
 
     # Register the pie menu keymap
     wm = bpy.context.window_manager
-    km = wm.keyconfigs.addon.keymaps.new(name='3D View', space_type='VIEW_3D')
-    kmi = km.keymap_items.new("wm.call_menu_pie", type='C', value='PRESS')
-    kmi.properties.name = "VIEW3D_MT_pie_utilities"
-    addon_keymaps.append(km)
+    kc = wm.keyconfigs.addon
+    if kc:
+        km = kc.keymaps.get('3D View')
+        if km is None:
+            km = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
+        # Avoid creating duplicate keymap items
+        exists = False
+        for kmi in km.keymap_items:
+            if (
+                kmi.idname == "wm.call_menu_pie"
+                and getattr(kmi.properties, "name", "") == "VIEW3D_MT_pie_utilities"
+                and kmi.type == 'C'
+                and kmi.value == 'PRESS'
+            ):
+                exists = True
+                break
+        if not exists:
+            kmi = km.keymap_items.new("wm.call_menu_pie", type='C', value='PRESS')
+            kmi.properties.name = "VIEW3D_MT_pie_utilities"
+            addon_keymaps.append(km)
 
 # Unregistration
 def unregister():

@@ -2,6 +2,7 @@ import bpy
 import json
 from mathutils import Vector
 from bpy_extras.io_utils import axis_conversion
+from bpy.props import StringProperty, EnumProperty
 
 from . import functions as fn
 
@@ -108,6 +109,81 @@ class RemoveDuplicateMaterialsOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class MoveSelectedToCollectionOperator(bpy.types.Operator):
+    bl_idname = "object.move_selected_to_collection"
+    bl_label = "Move Selected to Collection"
+    bl_options = {"REGISTER", "UNDO"}
+
+    filter_text: StringProperty(
+        name="Filter",
+        description="Filter collections by name",
+        default="",
+        options={"TEXTEDIT_UPDATE"},
+    )
+
+    def _collection_items(self, context):
+        items = []
+        filter_lower = (self.filter_text or "").lower()
+        for col in bpy.data.collections:
+            name = col.name
+            if filter_lower and filter_lower not in name.lower():
+                continue
+            items.append((name, name, ""))
+        if not items:
+            # Provide a disabled placeholder so the enum shows something
+            items.append(("", "<no matches>", ""))
+        return items
+
+    target_collection: EnumProperty(
+        name="Collection",
+        description="Target collection to move selected objects to",
+        items=_collection_items,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "filter_text")
+        layout.prop(self, "target_collection")
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def execute(self, context):
+        if not self.target_collection:
+            self.report({'WARNING'}, "No collection selected")
+            return {'CANCELLED'}
+
+        target = bpy.data.collections.get(self.target_collection)
+        if target is None:
+            self.report({'ERROR'}, "Collection not found")
+            return {'CANCELLED'}
+
+        selected_objects = list(context.selected_objects)
+        if not selected_objects:
+            self.report({'WARNING'}, "No selected objects to move")
+            return {'CANCELLED'}
+
+        moved_count = 0
+        for obj in selected_objects:
+            # Link first to ensure the object always remains in at least one collection
+            if target not in obj.users_collection:
+                try:
+                    target.objects.link(obj)
+                except RuntimeError:
+                    pass
+
+            # Unlink from all other collections
+            for col in list(obj.users_collection):
+                if col != target:
+                    try:
+                        col.objects.unlink(obj)
+                    except RuntimeError:
+                        pass
+            moved_count += 1
+
+        self.report({'INFO'}, f"Moved {moved_count} object(s) to '{target.name}'")
+        return {'FINISHED'}
+
 classes = [
     DistanceMeasureOperator,
     CopyTransformationsOperator,
@@ -115,6 +191,7 @@ classes = [
     ClearTransformationsClipboardOperator,
     SetOriginToBottomCenterOperator,
     RemoveDuplicateMaterialsOperator,
+    MoveSelectedToCollectionOperator,
 ]
 
 def register():
