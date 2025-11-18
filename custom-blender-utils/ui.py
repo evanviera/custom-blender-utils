@@ -15,6 +15,7 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.clear_transformations_clipboard", text="Clear Transformations")
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
+        layout.operator("image.reload_all_images", text="Reload All Images")
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection")
 
@@ -32,6 +33,7 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
         pie.operator("object.clear_transformations_clipboard", text="Clear Transformations")
         pie.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         pie.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
+        pie.operator("image.reload_all_images", text="Reload All Images")
         pie.operator("object.move_selected_to_collection", text="Move to Collection")
 
 # This function adds the menu to the toolbar

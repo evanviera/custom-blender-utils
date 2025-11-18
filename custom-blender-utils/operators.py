@@ -195,6 +195,33 @@ class MoveSelectedToCollectionOperator(bpy.types.Operator):
         self.report({'INFO'}, f"Moved {moved_count} object(s) to '{target.name}'")
         return {'FINISHED'}
 
+class ReloadAllImagesOperator(bpy.types.Operator):
+    bl_idname = "image.reload_all_images"
+    bl_label = "Reload All Images"
+    bl_description = "Reload all image files in the opened Blender file"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        reloaded_count = 0
+        skipped_count = 0
+        
+        for image in bpy.data.images:
+            # Only reload images that have a filepath (skip generated/packed images)
+            if image.filepath:
+                try:
+                    image.reload()
+                    reloaded_count += 1
+                except Exception as e:
+                    skipped_count += 1
+                    print(f"Failed to reload image '{image.name}': {e}")
+        
+        if reloaded_count > 0:
+            self.report({'INFO'}, f"Reloaded {reloaded_count} image(s)" + (f", skipped {skipped_count}" if skipped_count > 0 else ""))
+        else:
+            self.report({'WARNING'}, "No images with filepaths found to reload")
+        
+        return {'FINISHED'}
+
 classes = [
     DistanceMeasureOperator,
     CopyTransformationsOperator,
@@ -203,6 +230,7 @@ classes = [
     SetOriginToBottomCenterOperator,
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
+    ReloadAllImagesOperator,
 ]
 
 def register():
