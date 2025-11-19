@@ -222,6 +222,64 @@ class ReloadAllImagesOperator(bpy.types.Operator):
         
         return {'FINISHED'}
 
+class LinkInstancedCollectionOperator(bpy.types.Operator):
+    bl_idname = "collection.link_instanced_collection"
+    bl_label = "Link Instanced Collection to Scene"
+    bl_description = "Link the collection from the selected instanced collection object to the current scene"
+    bl_options = {"REGISTER", "UNDO"}
+
+    def execute(self, context):
+        # Get the active (selected) object
+        if not context.selected_objects:
+            self.report({'WARNING'}, "No object selected")
+            return {'CANCELLED'}
+
+        obj = context.active_object
+        if not obj:
+            self.report({'WARNING'}, "No active object selected")
+            return {'CANCELLED'}
+
+        # Check if the object is a collection instance
+        # In Blender, collection instances can be:
+        # 1. EMPTY objects with instance_type='COLLECTION' and instance_collection set
+        # 2. COLLECTION type objects (in newer Blender versions)
+        collection = None
+        
+        if obj.type == 'EMPTY' and obj.instance_type == 'COLLECTION' and obj.instance_collection:
+            collection = obj.instance_collection
+        elif hasattr(obj, 'instance_collection') and obj.instance_collection:
+            collection = obj.instance_collection
+        else:
+            self.report({'WARNING'}, f"Selected object '{obj.name}' is not an instanced collection")
+            return {'CANCELLED'}
+
+        if not collection:
+            self.report({'ERROR'}, "Could not find collection from instance")
+            return {'CANCELLED'}
+
+        # Check if the collection is already linked to the scene
+        scene_collection = context.scene.collection
+        # Check if collection is already a child of the scene collection
+        if collection.name in scene_collection.children:
+            # Double-check that it's the same collection object
+            if scene_collection.children[collection.name] == collection:
+                self.report({'INFO'}, f"Collection '{collection.name}' is already linked to the scene")
+                return {'FINISHED'}
+
+        # Link the collection to the scene
+        try:
+            scene_collection.children.link(collection)
+            self.report({'INFO'}, f"Linked collection '{collection.name}' to the scene")
+            return {'FINISHED'}
+        except RuntimeError as e:
+            # If it's already linked, the error message will indicate that
+            error_msg = str(e)
+            if "already linked" in error_msg.lower() or "already in" in error_msg.lower():
+                self.report({'INFO'}, f"Collection '{collection.name}' is already linked to the scene")
+                return {'FINISHED'}
+            self.report({'ERROR'}, f"Failed to link collection: {error_msg}")
+            return {'CANCELLED'}
+
 classes = [
     DistanceMeasureOperator,
     CopyTransformationsOperator,
@@ -231,6 +289,7 @@ classes = [
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
     ReloadAllImagesOperator,
+    LinkInstancedCollectionOperator,
 ]
 
 def register():

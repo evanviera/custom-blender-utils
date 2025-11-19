@@ -18,6 +18,7 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("image.reload_all_images", text="Reload All Images")
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection")
+        layout.operator("collection.link_instanced_collection", text="Link Instanced Collection to Scene")
 
 # Pie menu
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):
@@ -35,6 +36,7 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
         pie.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         pie.operator("image.reload_all_images", text="Reload All Images")
         pie.operator("object.move_selected_to_collection", text="Move to Collection")
+        pie.operator("collection.link_instanced_collection", text="Link Instanced Collection")
 
 # This function adds the menu to the toolbar
 def draw_func(self, context):
