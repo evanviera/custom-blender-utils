@@ -225,7 +225,10 @@ class ReloadAllImagesOperator(bpy.types.Operator):
 class LinkInstancedCollectionOperator(bpy.types.Operator):
     bl_idname = "collection.link_instanced_collection"
     bl_label = "Link Instanced Collection to Scene"
-    bl_description = "Link the collection from the selected instanced collection object to the current scene"
+    bl_description = (
+        "Link the collection from the selected instanced collection object to the "
+        "current scene, isolate it in the active 3D View, and frame it on screen"
+    )
     bl_options = {"REGISTER", "UNDO"}
 
     def execute(self, context):
@@ -257,28 +260,103 @@ class LinkInstancedCollectionOperator(bpy.types.Operator):
             self.report({'ERROR'}, "Could not find collection from instance")
             return {'CANCELLED'}
 
-        # Check if the collection is already linked to the scene
+        # Ensure the collection is linked to the scene's master collection
         scene_collection = context.scene.collection
+        linked_now = False
+
         # Check if collection is already a child of the scene collection
         if collection.name in scene_collection.children:
             # Double-check that it's the same collection object
             if scene_collection.children[collection.name] == collection:
-                self.report({'INFO'}, f"Collection '{collection.name}' is already linked to the scene")
-                return {'FINISHED'}
+                # Already linked to the scene root
+                pass
+            else:
+                # A collection with the same name exists, but it's not the same object.
+                # Still try to link; Blender will prevent duplicate parentage as needed.
+                try:
+                    scene_collection.children.link(collection)
+                    linked_now = True
+                except RuntimeError as e:
+                    error_msg = str(e)
+                    if "already linked" not in error_msg.lower() and "already in" not in error_msg.lower():
+                        self.report({'ERROR'}, f"Failed to link collection: {error_msg}")
+                        return {'CANCELLED'}
+        else:
+            # Not present as a child; link it
+            try:
+                scene_collection.children.link(collection)
+                linked_now = True
+            except RuntimeError as e:
+                error_msg = str(e)
+                if "already linked" not in error_msg.lower() and "already in" not in error_msg.lower():
+                    self.report({'ERROR'}, f"Failed to link collection: {error_msg}")
+                    return {'CANCELLED'}
 
-        # Link the collection to the scene
-        try:
-            scene_collection.children.link(collection)
-            self.report({'INFO'}, f"Linked collection '{collection.name}' to the scene")
+        # At this point, the collection is guaranteed to be part of the scene.
+        # Next: isolate and frame this collection in the active 3D View.
+
+        # Collect all objects in the collection, including nested child collections
+        objs_in_collection = set()
+
+        def _gather_objects(coll: bpy.types.Collection):
+            for o in coll.objects:
+                objs_in_collection.add(o)
+            for child_coll in coll.children:
+                _gather_objects(child_coll)
+
+        _gather_objects(collection)
+
+        if not objs_in_collection:
+            msg = (
+                f"Collection '{collection.name}' linked to scene but has no objects to display"
+                if linked_now
+                else f"Collection '{collection.name}' is in the scene but has no objects to display"
+            )
+            self.report({'INFO'}, msg)
             return {'FINISHED'}
-        except RuntimeError as e:
-            # If it's already linked, the error message will indicate that
-            error_msg = str(e)
-            if "already linked" in error_msg.lower() or "already in" in error_msg.lower():
-                self.report({'INFO'}, f"Collection '{collection.name}' is already linked to the scene")
-                return {'FINISHED'}
-            self.report({'ERROR'}, f"Failed to link collection: {error_msg}")
-            return {'CANCELLED'}
+
+        # Ensure we're in Object mode so view operators work reliably
+        if context.mode != 'OBJECT':
+            try:
+                bpy.ops.object.mode_set(mode='OBJECT')
+            except Exception:
+                pass
+
+        # Deselect everything and select all objects in the collection
+        for obj_sel in list(context.selected_objects):
+            obj_sel.select_set(False)
+
+        for o in objs_in_collection:
+            o.select_set(True)
+
+        # Set an active object from the collection
+        active_obj = next(iter(objs_in_collection))
+        context.view_layer.objects.active = active_obj
+
+        # Isolate and frame in the active 3D View (if we are in one)
+        if getattr(context, "area", None) and context.area.type == 'VIEW_3D':
+            try:
+                # Local view will both isolate selection in this view and can frame it
+                bpy.ops.view3d.localview(frame_selected=True)
+            except Exception:
+                # Fallback: at least frame the selected objects
+                try:
+                    bpy.ops.view3d.view_selected()
+                except Exception:
+                    pass
+
+        if linked_now:
+            self.report(
+                {'INFO'},
+                f"Linked and isolated collection '{collection.name}' in the active view",
+            )
+        else:
+            self.report(
+                {'INFO'},
+                f"Isolated collection '{collection.name}' in the active view",
+            )
+
+        return {'FINISHED'}
 
 classes = [
     DistanceMeasureOperator,
