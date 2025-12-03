@@ -18,7 +18,12 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("image.reload_all_images", text="Reload All Images")
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection")
-        layout.operator("collection.link_instanced_collection", text="Link Instanced Collection to Scene")
+
+        # Edit/Close Collection toggle, label depends on whether an edit session is active
+        scene = context.scene
+        is_editing = bool(scene.get("custom_utils_edit_collection_name"))
+        label = "Close Collection" if is_editing else "Edit Collection"
+        layout.operator("collection.edit_instanced_collection", text=label)
 
 # Pie menu
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):
@@ -31,12 +36,16 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
         pie.operator("object.measure_surface_point", text="Measure Surface Point")
         pie.operator("object.copy_transformations", text="Copy Transformations")
         pie.operator("object.paste_transformations", text="Paste Transformations")
-        pie.operator("object.clear_transformations_clipboard", text="Clear Transformations")
         pie.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         pie.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         pie.operator("image.reload_all_images", text="Reload All Images")
         pie.operator("object.move_selected_to_collection", text="Move to Collection")
-        pie.operator("collection.link_instanced_collection", text="Link Instanced Collection")
+
+        # Edit/Close Collection toggle in pie menu
+        scene = context.scene
+        is_editing = bool(scene.get("custom_utils_edit_collection_name"))
+        label = "Close Collection" if is_editing else "Edit Collection"
+        pie.operator("collection.edit_instanced_collection", text=label)
 
 # This function adds the menu to the toolbar
 def draw_func(self, context):

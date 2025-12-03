@@ -6,7 +6,7 @@ focus on discrete actions such as measuring, copying/pasting transformations,
 cleaning materials, changing origins, and moving objects between collections.
 """
 
-from bpy.props import StringProperty, EnumProperty
+from bpy.props import StringProperty, EnumProperty, IntProperty
 
 from . import functions as fn
 
@@ -222,98 +222,307 @@ class ReloadAllImagesOperator(bpy.types.Operator):
         
         return {'FINISHED'}
 
-class LinkInstancedCollectionOperator(bpy.types.Operator):
-    bl_idname = "collection.link_instanced_collection"
-    bl_label = "Link Instanced Collection to Scene"
+EDIT_COLLECTION_NAME_KEY = "custom_utils_edit_collection_name"
+EDIT_COLLECTION_LINKED_KEY = "custom_utils_edit_collection_linked_by_operator"
+EDIT_COLLECTION_AREA_POINTER_KEY = "custom_utils_edit_collection_area_ptr"
+EDIT_COLLECTION_REGION_POINTER_KEY = "custom_utils_edit_collection_region_ptr"
+
+
+class CUSTOMUTILS_UL_collection_picker(bpy.types.UIList):
+    """UI list to display collections with icons."""
+
+    bl_idname = "CUSTOMUTILS_UL_collection_picker"
+
+    def draw_item(
+        self,
+        context,
+        layout,
+        data,
+        item,
+        icon,
+        active_data,
+        active_propname,
+        index=0,
+        flt_flag=0,
+    ):
+        if item is None:
+            return
+        layout.label(text=item.name, icon='OUTLINER_COLLECTION')
+
+
+class EditInstancedCollectionOperator(bpy.types.Operator):
+    bl_idname = "collection.edit_instanced_collection"
+    bl_label = "Edit Collection"
     bl_description = (
-        "Link the collection from the selected instanced collection object to the "
-        "current scene, isolate it in the active 3D View, and frame it on screen"
+        "Toggle editing of an instanced collection: link and isolate it in the active "
+        "3D View, or close editing (optionally unlinking it) when run again"
     )
     bl_options = {"REGISTER", "UNDO"}
 
-    def execute(self, context):
-        # Get the active (selected) object
-        if not context.selected_objects:
-            self.report({'WARNING'}, "No object selected")
-            return {'CANCELLED'}
+    def _update_collection_name(self, context):
+        name = (self.collection_name or "").strip()
+        collections = bpy.data.collections
+        if not collections:
+            return
+        if name:
+            coll = collections.get(name)
+            if coll is not None:
+                idx = list(collections).index(coll)
+                if idx != self.collection_index:
+                    self.collection_index = idx
 
+    def _update_collection_index(self, context):
+        collections = bpy.data.collections
+        if not collections:
+            return
+        idx = self.collection_index
+        if idx < 0 or idx >= len(collections):
+            return
+        name = collections[idx].name
+        if name != self.collection_name:
+            self.collection_name = name
+
+    collection_name: StringProperty(
+        name="Collection",
+        description="Collection to edit when none is selected",
+        default="",
+        update=_update_collection_name,
+    )
+    collection_index: IntProperty(
+        name="Collection Index",
+        default=0,
+        min=0,
+        update=_update_collection_index,
+    )
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop_search(self, "collection_name", bpy.data, "collections", text="Collection")
+        layout.template_list(
+            "CUSTOMUTILS_UL_collection_picker",
+            "",
+            bpy.data,
+            "collections",
+            self,
+            "collection_index",
+            rows=8,
+        )
+
+    def invoke(self, context, event):
+        scene = context.scene
         obj = context.active_object
-        if not obj:
-            self.report({'WARNING'}, "No active object selected")
-            return {'CANCELLED'}
+        target_collection = self._get_instanced_collection(obj)
+        if target_collection:
+            # No need to show a dialog; proceed immediately
+            return self.execute(context)
 
-        # Check if the object is a collection instance
-        # In Blender, collection instances can be:
-        # 1. EMPTY objects with instance_type='COLLECTION' and instance_collection set
-        # 2. COLLECTION type objects (in newer Blender versions)
-        collection = None
-        
-        if obj.type == 'EMPTY' and obj.instance_type == 'COLLECTION' and obj.instance_collection:
-            collection = obj.instance_collection
-        elif hasattr(obj, 'instance_collection') and obj.instance_collection:
-            collection = obj.instance_collection
+        current_name = scene.get(EDIT_COLLECTION_NAME_KEY)
+        if current_name:
+            self.collection_name = current_name
+            return self.execute(context)
+
+        if bpy.data.collections:
+            self.collection_name = bpy.data.collections[0].name
         else:
-            self.report({'WARNING'}, f"Selected object '{obj.name}' is not an instanced collection")
+            self.report({'WARNING'}, "No collections exist in this file")
             return {'CANCELLED'}
 
-        if not collection:
-            self.report({'ERROR'}, "Could not find collection from instance")
-            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    @staticmethod
+    def _get_instanced_collection(obj: bpy.types.Object):
+        """Return the collection instanced by the object, or None."""
+        if obj is None:
+            return None
+        if obj.type == 'EMPTY' and getattr(obj, "instance_type", None) == 'COLLECTION' and obj.instance_collection:
+            return obj.instance_collection
+        if hasattr(obj, "instance_collection") and obj.instance_collection:
+            return obj.instance_collection
+        return None
+
+    @staticmethod
+    def _gather_objects_from_collection(collection: bpy.types.Collection):
+        """Recursively gather all objects from the collection and its children."""
+        objs = set()
+
+        def _gather(coll: bpy.types.Collection):
+            for o in coll.objects:
+                objs.add(o)
+            for child in coll.children:
+                _gather(child)
+
+        _gather(collection)
+        return objs
+
+    @staticmethod
+    def _iter_view3d_regions(
+        context: bpy.types.Context,
+        area_id=None,
+        region_id=None,
+    ):
+        """Yield (area, region) pairs for VIEW_3D WINDOW regions, optionally filtered."""
+        screen = getattr(context, "screen", None)
+        if screen is None:
+            return
+
+        for area in screen.areas:
+            if area.type != "VIEW_3D":
+                continue
+            if area_id is not None and str(area.as_pointer()) != area_id:
+                continue
+
+            window_regions = [reg for reg in area.regions if reg.type == "WINDOW"]
+            if region_id is not None:
+                window_regions.sort(key=lambda reg: str(reg.as_pointer()) != region_id)
+
+            for region in window_regions:
+                yield area, region
+
+            if area_id is not None:
+                break
+
+    @staticmethod
+    def _find_view3d_space(area: bpy.types.Area):
+        """Return the first VIEW_3D space for an area, or None."""
+        if not hasattr(area, "spaces"):
+            return None
+        for space in area.spaces:
+            if space.type == "VIEW_3D":
+                return space
+        return None
+
+    @staticmethod
+    def _toggle_local_view_for_region(
+        context: bpy.types.Context,
+        area: bpy.types.Area,
+        region: bpy.types.Region,
+    ) -> bool:
+        """Toggle local view for the provided area/region if currently active."""
+        space = EditInstancedCollectionOperator._find_view3d_space(area)
+        if space is None:
+            return False
+
+        rv3d = getattr(region, "data", None)
+        if rv3d is None:
+            rv3d = getattr(space, "region_3d", None)
+
+        # In Blender 4.x the space tracks whether local view is active
+        if getattr(space, "local_view", None) is None:
+            return False
+
+        try:
+            if hasattr(context, "temp_override"):
+                override_kwargs = {
+                    "area": area,
+                    "region": region,
+                    "space_data": space,
+                }
+                window = getattr(context, "window", None)
+                screen = getattr(context, "screen", None)
+                if window is not None:
+                    override_kwargs["window"] = window
+                if screen is not None:
+                    override_kwargs["screen"] = screen
+                if rv3d is not None:
+                    override_kwargs["region_data"] = rv3d
+                with context.temp_override(**override_kwargs):
+                    result = bpy.ops.view3d.localview(frame_selected=False)
+            else:
+                override = context.copy()
+                override["area"] = area
+                override["region"] = region
+                override["space_data"] = space
+                if rv3d is not None:
+                    override["region_data"] = rv3d
+                window = getattr(context, "window", None)
+                screen = getattr(context, "screen", None)
+                if window is not None:
+                    override["window"] = window
+                if screen is not None:
+                    override["screen"] = screen
+                result = bpy.ops.view3d.localview(override, frame_selected=False)
+        except Exception:
+            return False
+
+        if not isinstance(result, set) or 'FINISHED' not in result:
+            return False
+
+        # Ensure local view has been cleared
+        return getattr(space, "local_view", None) is None
+
+    @staticmethod
+    def _exit_local_view_if_active(
+        context: bpy.types.Context,
+        preferred_area_id=None,
+        preferred_region_id=None,
+    ):
+        """Exit local view, prioritizing the VIEW_3D area/region we entered with."""
+        # Attempt to toggle using the stored area/region from the active session
+        if preferred_area_id is not None or preferred_region_id is not None:
+            for area, region in EditInstancedCollectionOperator._iter_view3d_regions(
+                context, preferred_area_id, preferred_region_id
+            ):
+                if EditInstancedCollectionOperator._toggle_local_view_for_region(context, area, region):
+                    return
+
+        # Try the current context (e.g., the viewport where the operator was invoked)
+        area = getattr(context, "area", None)
+        region = getattr(context, "region", None)
+        if (
+            area is not None
+            and area.type == "VIEW_3D"
+            and region is not None
+            and region.type == "WINDOW"
+        ):
+            if EditInstancedCollectionOperator._toggle_local_view_for_region(context, area, region):
+                return
+
+        # Fallback: scan all VIEW_3D window regions and exit the first local view found
+        for area, region in EditInstancedCollectionOperator._iter_view3d_regions(context):
+            if EditInstancedCollectionOperator._toggle_local_view_for_region(context, area, region):
+                return
+
+    @staticmethod
+    def _start_edit_collection(
+        context: bpy.types.Context, collection: bpy.types.Collection
+    ):
+        """Prepare the scene and view for editing this collection.
+
+        Returns a tuple: (linked_now, area_id, region_id).
+        """
+        scene = context.scene
+        scene_collection = scene.collection
+        linked_now = False
+        area_id = None
+        region_id = None
 
         # Ensure the collection is linked to the scene's master collection
-        scene_collection = context.scene.collection
-        linked_now = False
-
-        # Check if collection is already a child of the scene collection
         if collection.name in scene_collection.children:
-            # Double-check that it's the same collection object
-            if scene_collection.children[collection.name] == collection:
-                # Already linked to the scene root
-                pass
-            else:
-                # A collection with the same name exists, but it's not the same object.
-                # Still try to link; Blender will prevent duplicate parentage as needed.
+            if scene_collection.children[collection.name] != collection:
+                # Name collision with a different collection; still try to link.
                 try:
                     scene_collection.children.link(collection)
                     linked_now = True
                 except RuntimeError as e:
                     error_msg = str(e)
                     if "already linked" not in error_msg.lower() and "already in" not in error_msg.lower():
-                        self.report({'ERROR'}, f"Failed to link collection: {error_msg}")
-                        return {'CANCELLED'}
+                        raise
         else:
-            # Not present as a child; link it
             try:
                 scene_collection.children.link(collection)
                 linked_now = True
             except RuntimeError as e:
                 error_msg = str(e)
                 if "already linked" not in error_msg.lower() and "already in" not in error_msg.lower():
-                    self.report({'ERROR'}, f"Failed to link collection: {error_msg}")
-                    return {'CANCELLED'}
-
-        # At this point, the collection is guaranteed to be part of the scene.
-        # Next: isolate and frame this collection in the active 3D View.
+                    raise
 
         # Collect all objects in the collection, including nested child collections
-        objs_in_collection = set()
-
-        def _gather_objects(coll: bpy.types.Collection):
-            for o in coll.objects:
-                objs_in_collection.add(o)
-            for child_coll in coll.children:
-                _gather_objects(child_coll)
-
-        _gather_objects(collection)
+        objs_in_collection = EditInstancedCollectionOperator._gather_objects_from_collection(
+            collection
+        )
 
         if not objs_in_collection:
-            msg = (
-                f"Collection '{collection.name}' linked to scene but has no objects to display"
-                if linked_now
-                else f"Collection '{collection.name}' is in the scene but has no objects to display"
-            )
-            self.report({'INFO'}, msg)
-            return {'FINISHED'}
+            return linked_now, area_id, region_id
 
         # Ensure we're in Object mode so view operators work reliably
         if context.mode != 'OBJECT':
@@ -334,9 +543,15 @@ class LinkInstancedCollectionOperator(bpy.types.Operator):
         context.view_layer.objects.active = active_obj
 
         # Isolate and frame in the active 3D View (if we are in one)
-        if getattr(context, "area", None) and context.area.type == 'VIEW_3D':
+        area = getattr(context, "area", None)
+        region = getattr(context, "region", None)
+        if area is not None and area.type == 'VIEW_3D':
+            area_id = str(area.as_pointer())
+            if region is not None and region.type == 'WINDOW':
+                region_id = str(region.as_pointer())
+
+        if area and area.type == 'VIEW_3D':
             try:
-                # Local view will both isolate selection in this view and can frame it
                 bpy.ops.view3d.localview(frame_selected=True)
             except Exception:
                 # Fallback: at least frame the selected objects
@@ -345,20 +560,131 @@ class LinkInstancedCollectionOperator(bpy.types.Operator):
                 except Exception:
                     pass
 
+        return linked_now, area_id, region_id
+
+    @staticmethod
+    def _close_edit_collection(
+        context: bpy.types.Context,
+        collection: bpy.types.Collection,
+        linked_by_operator: bool,
+        preferred_area_id=None,
+        preferred_region_id=None,
+    ) -> None:
+        """Close editing for the given collection: exit local view and optionally unlink."""
+        scene = context.scene
+        scene_collection = scene.collection
+
+        # Exit local view for the active 3D View, but only if it's currently active
+        EditInstancedCollectionOperator._exit_local_view_if_active(
+            context, preferred_area_id, preferred_region_id
+        )
+
+        # Only unlink if this operator originally linked the collection
+        if linked_by_operator and collection.name in scene_collection.children:
+            try:
+                if scene_collection.children[collection.name] == collection:
+                    scene_collection.children.unlink(collection)
+            except RuntimeError:
+                # If unlink fails (e.g., already unlinked), just ignore
+                pass
+
+    def execute(self, context):
+        scene = context.scene
+
+        # Current selection / target collection (for a potential new edit session)
+        obj = context.active_object
+        override_name = (self.collection_name or "").strip()
+        override_collection = (
+            bpy.data.collections.get(override_name) if override_name else None
+        )
+        target_collection = override_collection or self._get_instanced_collection(obj)
+
+        # Read current edit-session state from the scene
+        current_name = scene.get(EDIT_COLLECTION_NAME_KEY)
+        linked_flag = bool(scene.get(EDIT_COLLECTION_LINKED_KEY))
+        current_collection = (
+            bpy.data.collections.get(current_name) if current_name else None
+        )
+        stored_area_id = scene.get(EDIT_COLLECTION_AREA_POINTER_KEY)
+        stored_region_id = scene.get(EDIT_COLLECTION_REGION_POINTER_KEY)
+
+        # Determine whether we're closing the same collection we would otherwise edit
+        closing_same = (
+            current_collection is not None
+            and target_collection is not None
+            and current_collection == target_collection
+        )
+
+        # If there's an active edit collection, close it first
+        if current_collection is not None:
+            self._close_edit_collection(
+                context,
+                current_collection,
+                linked_flag,
+                stored_area_id or None,
+                stored_region_id or None,
+            )
+            # Clear state
+            for key in (
+                EDIT_COLLECTION_NAME_KEY,
+                EDIT_COLLECTION_LINKED_KEY,
+                EDIT_COLLECTION_AREA_POINTER_KEY,
+                EDIT_COLLECTION_REGION_POINTER_KEY,
+            ):
+                if key in scene:
+                    del scene[key]
+
+        # If we just closed the same collection, we're done (pure "Close Collection")
+        if closing_same:
+            self.report({'INFO'}, f"Closed editing for collection '{current_collection.name}'")
+            return {'FINISHED'}
+
+        # If there's no collection to start editing, stop here
+        if target_collection is None:
+            self.report(
+                {'WARNING'},
+                "No instanced collection found on the active object to start editing",
+            )
+            return {'CANCELLED'}
+
+        # Start editing the new target collection
+        try:
+            linked_now, new_area_id, new_region_id = self._start_edit_collection(
+                context, target_collection
+            )
+        except RuntimeError as e:
+            self.report({'ERROR'}, f"Failed to prepare collection for editing: {e}")
+            return {'CANCELLED'}
+
+        # Persist edit-session state on the scene
+        scene[EDIT_COLLECTION_NAME_KEY] = target_collection.name
+        scene[EDIT_COLLECTION_LINKED_KEY] = bool(linked_now)
+        if new_area_id:
+            scene[EDIT_COLLECTION_AREA_POINTER_KEY] = new_area_id
+        else:
+            scene.pop(EDIT_COLLECTION_AREA_POINTER_KEY, None)
+        if new_region_id:
+            scene[EDIT_COLLECTION_REGION_POINTER_KEY] = new_region_id
+        else:
+            scene.pop(EDIT_COLLECTION_REGION_POINTER_KEY, None)
+
         if linked_now:
             self.report(
                 {'INFO'},
-                f"Linked and isolated collection '{collection.name}' in the active view",
+                f"Editing collection '{target_collection.name}' "
+                f"(linked to scene and isolated in active view)",
             )
         else:
             self.report(
                 {'INFO'},
-                f"Isolated collection '{collection.name}' in the active view",
+                f"Editing collection '{target_collection.name}' "
+                f"(already in scene, isolated in active view)",
             )
 
         return {'FINISHED'}
 
 classes = [
+    CUSTOMUTILS_UL_collection_picker,
     DistanceMeasureOperator,
     CopyTransformationsOperator,
     PasteTransformationsOperator,
@@ -367,7 +693,7 @@ classes = [
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
     ReloadAllImagesOperator,
-    LinkInstancedCollectionOperator,
+    EditInstancedCollectionOperator,
 ]
 
 def register():
