@@ -295,6 +295,19 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         update=_update_collection_index,
     )
 
+    @staticmethod
+    def _get_context_collection(context: bpy.types.Context):
+        """Return the active collection from the current context, if any."""
+        coll = getattr(context, "collection", None)
+        if coll is not None:
+            return coll
+        view_layer = getattr(context, "view_layer", None)
+        if view_layer is not None:
+            layer_coll = getattr(view_layer, "active_layer_collection", None)
+            if layer_coll is not None:
+                return layer_coll.collection
+        return None
+
     def draw(self, context):
         layout = self.layout
         layout.prop_search(self, "collection_name", bpy.data, "collections", text="Collection")
@@ -319,6 +332,12 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         current_name = scene.get(EDIT_COLLECTION_NAME_KEY)
         if current_name:
             self.collection_name = current_name
+            return self.execute(context)
+
+        context_collection = self._get_context_collection(context)
+        if context_collection is not None:
+            self.collection_name = context_collection.name
+            self.collection_index = list(bpy.data.collections).index(context_collection)
             return self.execute(context)
 
         if bpy.data.collections:
@@ -598,6 +617,10 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
             bpy.data.collections.get(override_name) if override_name else None
         )
         target_collection = override_collection or self._get_instanced_collection(obj)
+        if target_collection is None:
+            context_collection = self._get_context_collection(context)
+            if context_collection is not None:
+                target_collection = context_collection
 
         # Read current edit-session state from the scene
         current_name = scene.get(EDIT_COLLECTION_NAME_KEY)
