@@ -308,6 +308,12 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
                 return layer_coll.collection
         return None
 
+    def _assign_collection(self, collection: bpy.types.Collection):
+        """Sync operator properties to a specific collection."""
+        if collection is None:
+            return
+        self.collection_name = collection.name
+
     def draw(self, context):
         layout = self.layout
         layout.prop_search(self, "collection_name", bpy.data, "collections", text="Collection")
@@ -327,17 +333,18 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         target_collection = self._get_instanced_collection(obj)
         if target_collection:
             # No need to show a dialog; proceed immediately
+            self._assign_collection(target_collection)
             return self.execute(context)
 
         current_name = scene.get(EDIT_COLLECTION_NAME_KEY)
         if current_name:
-            self.collection_name = current_name
+            coll = bpy.data.collections.get(current_name)
+            self._assign_collection(coll)
             return self.execute(context)
 
         context_collection = self._get_context_collection(context)
         if context_collection is not None:
-            self.collection_name = context_collection.name
-            self.collection_index = list(bpy.data.collections).index(context_collection)
+            self._assign_collection(context_collection)
             return self.execute(context)
 
         if bpy.data.collections:
@@ -616,11 +623,16 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         override_collection = (
             bpy.data.collections.get(override_name) if override_name else None
         )
-        target_collection = override_collection or self._get_instanced_collection(obj)
+        instanced_collection = self._get_instanced_collection(obj)
+        target_collection = instanced_collection
+        if target_collection is None and override_collection is not None:
+            target_collection = override_collection
         if target_collection is None:
             context_collection = self._get_context_collection(context)
             if context_collection is not None:
                 target_collection = context_collection
+        if target_collection is not None:
+            self._assign_collection(target_collection)
 
         # Read current edit-session state from the scene
         current_name = scene.get(EDIT_COLLECTION_NAME_KEY)
