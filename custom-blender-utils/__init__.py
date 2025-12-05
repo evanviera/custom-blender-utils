@@ -8,7 +8,7 @@ registration.
 bl_info = {
     "name": "Custom Utilities",
     "author": "Evan Viera",
-    "version": (0, 1, 8),
+    "version": (0, 1, 9),
     "blender": (2, 80, 0),
     "location": "3D View > Header menu (Utilities) and C pie menu",
     "description": "A curated set of everyday operators for modeling and scene management.",

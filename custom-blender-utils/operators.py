@@ -313,6 +313,11 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         if collection is None:
             return
         self.collection_name = collection.name
+        collections = list(bpy.data.collections)
+        try:
+            self.collection_index = collections.index(collection)
+        except ValueError:
+            pass
 
     def draw(self, context):
         layout = self.layout
@@ -345,13 +350,13 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         context_collection = self._get_context_collection(context)
         if context_collection is not None:
             self._assign_collection(context_collection)
-            return self.execute(context)
 
-        if bpy.data.collections:
-            self.collection_name = bpy.data.collections[0].name
-        else:
+        if not bpy.data.collections:
             self.report({'WARNING'}, "No collections exist in this file")
             return {'CANCELLED'}
+
+        if not self.collection_name:
+            self._assign_collection(bpy.data.collections[0])
 
         return context.window_manager.invoke_props_dialog(self, width=360)
 
@@ -623,10 +628,7 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         override_collection = (
             bpy.data.collections.get(override_name) if override_name else None
         )
-        instanced_collection = self._get_instanced_collection(obj)
-        target_collection = instanced_collection
-        if target_collection is None and override_collection is not None:
-            target_collection = override_collection
+        target_collection = override_collection or self._get_instanced_collection(obj)
         if target_collection is None:
             context_collection = self._get_context_collection(context)
             if context_collection is not None:
