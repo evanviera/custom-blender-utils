@@ -6,7 +6,7 @@ focus on discrete actions such as measuring, copying/pasting transformations,
 cleaning materials, changing origins, and moving objects between collections.
 """
 
-from bpy.props import StringProperty, EnumProperty, IntProperty
+from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty, CollectionProperty
 
 from . import functions as fn
 
@@ -54,6 +54,412 @@ class ClearTransformationsClipboardOperator(bpy.types.Operator):
     def execute(self, context):
         fn.clear_transformations()
         return {'FINISHED'}
+
+
+class CUSTOMUTILS_PG_gn_network_selection_item(bpy.types.PropertyGroup):
+    entry_id: StringProperty(name="Entry ID", default="")
+    label: StringProperty(name="Label", default="")
+    enabled: BoolProperty(name="Enabled", default=True)
+
+
+class CUSTOMUTILS_PG_gn_parameter_selection_item(bpy.types.PropertyGroup):
+    entry_id: StringProperty(name="Entry ID", default="")
+    kind: StringProperty(name="Kind", default="")
+    key: StringProperty(name="Key", default="")
+    label: StringProperty(name="Label", default="")
+    enabled: BoolProperty(name="Enabled", default=True)
+
+
+class CUSTOMUTILS_PG_gn_match_network_item(bpy.types.PropertyGroup):
+    group_key: StringProperty(name="Group Key", default="")
+    label: StringProperty(name="Label", default="")
+    enabled: BoolProperty(name="Enabled", default=True)
+
+
+class CUSTOMUTILS_UL_gn_network_selection(bpy.types.UIList):
+    bl_idname = "CUSTOMUTILS_UL_gn_network_selection"
+
+    def draw_item(
+        self,
+        context,
+        layout,
+        data,
+        item,
+        icon,
+        active_data,
+        active_propname,
+        index=0,
+        flt_flag=0,
+    ):
+        if item is None:
+            return
+        row = layout.row(align=True)
+        row.prop(item, "enabled", text="")
+        row.label(text=item.label)
+
+
+class CUSTOMUTILS_UL_gn_parameter_selection(bpy.types.UIList):
+    bl_idname = "CUSTOMUTILS_UL_gn_parameter_selection"
+
+    def draw_item(
+        self,
+        context,
+        layout,
+        data,
+        item,
+        icon,
+        active_data,
+        active_propname,
+        index=0,
+        flt_flag=0,
+    ):
+        if item is None:
+            return
+        row = layout.row(align=True)
+        row.prop(item, "enabled", text="")
+        row.label(text=item.label)
+
+
+class CopyGeometryNodesModifierAttributesOperator(bpy.types.Operator):
+    bl_idname = "object.copy_geometry_nodes_modifier_attributes"
+    bl_label = "Copy Geometry Nodes Attributes"
+    bl_description = "Copy all Geometry Nodes modifier settings and inputs from the active object"
+    bl_options = {"REGISTER"}
+
+    def execute(self, context):
+        active_obj = context.active_object
+        if active_obj is None:
+            self.report({'WARNING'}, "No active object to copy from")
+            return {'CANCELLED'}
+
+        stats = fn.copy_geometry_nodes_modifiers(active_obj)
+        copied_modifiers = stats.get('copied_modifiers', 0)
+        copied_groups = stats.get('copied_groups', 0)
+
+        if copied_modifiers == 0:
+            self.report({'WARNING'}, f"No Geometry Nodes modifiers found on '{active_obj.name}'")
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            (
+                f"Copied {copied_modifiers} Geometry Nodes modifier(s) from '{active_obj.name}' "
+                f"across {copied_groups} node group key(s)"
+            ),
+        )
+        return {'FINISHED'}
+
+
+class PasteGeometryNodesModifierAttributesOperator(bpy.types.Operator):
+    bl_idname = "object.paste_geometry_nodes_modifier_attributes"
+    bl_label = "Paste Geometry Nodes Attributes"
+    bl_description = "Paste copied Geometry Nodes modifier settings/inputs to matching modifiers on selected objects"
+    bl_options = {"REGISTER", "UNDO"}
+
+    exclude_active: BoolProperty(
+        name="Exclude Active Object",
+        description="Skip the active object when pasting to selected objects",
+        default=False,
+    )
+
+    @staticmethod
+    def _populate_selection_lists(context: bpy.types.Context) -> bool:
+        network_items = fn.get_geometry_nodes_clipboard_network_items()
+        parameter_items_by_entry = fn.get_geometry_nodes_clipboard_entry_parameter_items()
+
+        if not network_items:
+            return False
+
+        wm = context.window_manager
+        wm.custom_utils_gn_network_selection_items.clear()
+        wm.custom_utils_gn_parameter_selection_items.clear()
+
+        for entry_id, label, _description in network_items:
+            item = wm.custom_utils_gn_network_selection_items.add()
+            item.entry_id = entry_id
+            item.label = label
+            item.enabled = True
+
+            for param in parameter_items_by_entry.get(entry_id, []):
+                item = wm.custom_utils_gn_parameter_selection_items.add()
+                item.entry_id = entry_id
+                item.kind = param.get('kind', '')
+                item.key = param.get('key', '')
+                item.label = param.get('label', item.key)
+                item.enabled = True
+
+        wm.custom_utils_gn_network_selection_index = 0
+        wm.custom_utils_gn_parameter_selection_index = 0
+        return bool(wm.custom_utils_gn_parameter_selection_items)
+
+    def invoke(self, context, event):
+        if not fn.has_geometry_nodes_modifiers_data():
+            self.report({'WARNING'}, "Geometry Nodes clipboard is empty")
+            return {'CANCELLED'}
+
+        if not self._populate_selection_lists(context):
+            self.report({'WARNING'}, "No copied Geometry Nodes networks/parameters found in clipboard")
+            return {'CANCELLED'}
+
+        return context.window_manager.invoke_props_dialog(self, width=640)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "exclude_active")
+
+        wm = context.window_manager
+
+        params_box = layout.box()
+        params_box.label(text="Geometry Nodes Networks and Parameters")
+        if not wm.custom_utils_gn_network_selection_items:
+            params_box.label(text="No copied networks available")
+            return
+
+        for network_item in wm.custom_utils_gn_network_selection_items:
+            network_box = params_box.box()
+            header = network_box.row(align=True)
+            header.prop(network_item, "enabled", text="")
+            header.label(text=network_item.label)
+
+            params_col = network_box.column(align=True)
+            params_col.enabled = network_item.enabled
+            has_params = False
+            for param_item in wm.custom_utils_gn_parameter_selection_items:
+                if param_item.entry_id != network_item.entry_id:
+                    continue
+                params_col.prop(param_item, "enabled", text=param_item.label)
+                has_params = True
+            if not has_params:
+                params_col.label(text="No parameters captured")
+
+    def execute(self, context):
+        if not fn.has_geometry_nodes_modifiers_data():
+            self.report({'WARNING'}, "Geometry Nodes clipboard is empty")
+            return {'CANCELLED'}
+
+        wm = context.window_manager
+        if not wm.custom_utils_gn_network_selection_items or not wm.custom_utils_gn_parameter_selection_items:
+            if not self._populate_selection_lists(context):
+                self.report({'WARNING'}, "No copied Geometry Nodes networks/parameters found in clipboard")
+                return {'CANCELLED'}
+
+        selected_networks = {
+            item.entry_id for item in wm.custom_utils_gn_network_selection_items if item.enabled
+        }
+        if not selected_networks:
+            self.report({'WARNING'}, "No Geometry Nodes networks selected")
+            return {'CANCELLED'}
+
+        selected_parameters_by_entry = {}
+        for item in wm.custom_utils_gn_parameter_selection_items:
+            if item.entry_id not in selected_networks:
+                continue
+            if not item.enabled:
+                continue
+            selected_parameters_by_entry.setdefault(item.entry_id, set()).add((item.kind, item.key))
+
+        selected_objects = list(context.selected_objects)
+        if not selected_objects:
+            self.report({'WARNING'}, "No selected objects to paste to")
+            return {'CANCELLED'}
+
+        active_obj = context.active_object
+        targets = selected_objects
+        if self.exclude_active and active_obj is not None:
+            targets = [obj for obj in selected_objects if obj != active_obj]
+
+        if not targets:
+            self.report({'WARNING'}, "No target objects remain after excluding the active object")
+            return {'CANCELLED'}
+
+        matched_modifiers = 0
+        applied_values = 0
+        skipped_missing = 0
+        skipped_type = 0
+
+        for obj in targets:
+            stats = fn.paste_geometry_nodes_modifiers(
+                obj,
+                selected_entry_ids=selected_networks,
+                selected_parameters_by_entry=selected_parameters_by_entry,
+                context=context,
+            )
+            matched_modifiers += stats.get('matched_modifiers', 0)
+            applied_values += stats.get('applied_values', 0)
+            skipped_missing += stats.get('skipped_missing', 0)
+            skipped_type += stats.get('skipped_type', 0)
+
+            try:
+                obj.update_tag(refresh={'DATA'})
+            except TypeError:
+                try:
+                    obj.update_tag()
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+            obj_data = getattr(obj, "data", None)
+            if obj_data is not None and hasattr(obj_data, "update_tag"):
+                try:
+                    obj_data.update_tag()
+                except Exception:
+                    pass
+
+        try:
+            context.view_layer.update()
+        except Exception:
+            pass
+        try:
+            context.evaluated_depsgraph_get().update()
+        except Exception:
+            pass
+        if matched_modifiers > 0:
+            try:
+                current_frame = context.scene.frame_current
+                context.scene.frame_set(current_frame)
+            except Exception:
+                pass
+
+        report_level = {'INFO'} if matched_modifiers > 0 else {'WARNING'}
+        self.report(
+            report_level,
+            (
+                f"Pasted to {len(targets)} object(s): matched {matched_modifiers} Geometry Nodes modifier(s), "
+                f"applied {applied_values} value(s), skipped {skipped_missing} missing socket/setting(s), "
+                f"skipped {skipped_type} type-mismatch or non-writable value(s)"
+            ),
+        )
+        return {'FINISHED'}
+
+
+class SelectObjectsWithMatchingGeometryNodesOperator(bpy.types.Operator):
+    bl_idname = "object.select_objects_with_matching_geometry_nodes"
+    bl_label = "Select Matching Geometry Nodes Objects"
+    bl_description = (
+        "Select all objects in the active scene that use the same Geometry Nodes "
+        "network(s) as the active object"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @staticmethod
+    def _populate_network_list(context: bpy.types.Context, source_obj: bpy.types.Object) -> bool:
+        choices = fn.get_object_geometry_nodes_network_choices(source_obj)
+        if not choices:
+            return False
+
+        wm = context.window_manager
+        wm.custom_utils_gn_match_network_items.clear()
+
+        for choice in choices:
+            item = wm.custom_utils_gn_match_network_items.add()
+            item.group_key = choice.get('group_key', '')
+            item.label = choice.get('label', choice.get('name', item.group_key))
+            item.enabled = True
+
+        wm.custom_utils_gn_match_network_index = 0
+        return True
+
+    def invoke(self, context, event):
+        active_obj = context.active_object
+        if active_obj is None:
+            self.report({'WARNING'}, "No active object")
+            return {'CANCELLED'}
+
+        if not self._populate_network_list(context, active_obj):
+            self.report({'WARNING'}, f"Active object '{active_obj.name}' has no Geometry Nodes modifiers")
+            return {'CANCELLED'}
+
+        return context.window_manager.invoke_props_dialog(self, width=540)
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        layout.label(text="Geometry Nodes Networks to Match")
+        layout.template_list(
+            "CUSTOMUTILS_UL_gn_network_selection",
+            "",
+            wm,
+            "custom_utils_gn_match_network_items",
+            wm,
+            "custom_utils_gn_match_network_index",
+            rows=8,
+        )
+
+    def execute(self, context):
+        active_obj = context.active_object
+        if active_obj is None:
+            self.report({'WARNING'}, "No active object")
+            return {'CANCELLED'}
+
+        wm = context.window_manager
+        if not wm.custom_utils_gn_match_network_items:
+            if not self._populate_network_list(context, active_obj):
+                self.report({'WARNING'}, f"Active object '{active_obj.name}' has no Geometry Nodes modifiers")
+                return {'CANCELLED'}
+
+        selected_network_keys = {
+            item.group_key
+            for item in wm.custom_utils_gn_match_network_items
+            if item.enabled and item.group_key
+        }
+        if not selected_network_keys:
+            self.report({'WARNING'}, "No Geometry Nodes networks selected to match")
+            return {'CANCELLED'}
+
+        source_keys = set(fn.get_geometry_nodes_modifier_group_keys(active_obj))
+        if not source_keys:
+            self.report({'WARNING'}, f"Active object '{active_obj.name}' has no Geometry Nodes modifiers")
+            return {'CANCELLED'}
+
+        for obj in list(context.selected_objects):
+            try:
+                obj.select_set(False)
+            except Exception:
+                pass
+
+        selected_matches = []
+        unselectable_matches = 0
+        for obj in context.scene.objects:
+            target_keys = set(fn.get_geometry_nodes_modifier_group_keys(obj))
+            if not selected_network_keys.issubset(target_keys):
+                continue
+            try:
+                obj.select_set(True)
+                selected_matches.append(obj)
+            except Exception:
+                unselectable_matches += 1
+
+        if not selected_matches:
+            if unselectable_matches > 0:
+                self.report(
+                    {'WARNING'},
+                    (
+                        f"Found {unselectable_matches} matching object(s), but none were selectable "
+                        f"in the current view layer"
+                    ),
+                )
+            else:
+                self.report({'WARNING'}, "No matching objects found in the active scene")
+            return {'CANCELLED'}
+
+        try:
+            if active_obj in selected_matches:
+                context.view_layer.objects.active = active_obj
+            else:
+                context.view_layer.objects.active = selected_matches[0]
+        except Exception:
+            pass
+
+        message = (
+            f"Selected {len(selected_matches)} object(s) matching {len(selected_network_keys)} "
+            f"Geometry Nodes network(s) from '{active_obj.name}'"
+        )
+        if unselectable_matches > 0:
+            message += f"; {unselectable_matches} matching object(s) were not selectable"
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
 
 class SetOriginToBottomCenterOperator(bpy.types.Operator):
     bl_idname = "object.set_origin_to_bottom_center"
@@ -721,11 +1127,19 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 classes = [
+    CUSTOMUTILS_PG_gn_network_selection_item,
+    CUSTOMUTILS_PG_gn_parameter_selection_item,
+    CUSTOMUTILS_PG_gn_match_network_item,
+    CUSTOMUTILS_UL_gn_network_selection,
+    CUSTOMUTILS_UL_gn_parameter_selection,
     CUSTOMUTILS_UL_collection_picker,
     DistanceMeasureOperator,
     CopyTransformationsOperator,
     PasteTransformationsOperator,
     ClearTransformationsClipboardOperator,
+    CopyGeometryNodesModifierAttributesOperator,
+    PasteGeometryNodesModifierAttributesOperator,
+    SelectObjectsWithMatchingGeometryNodesOperator,
     SetOriginToBottomCenterOperator,
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
@@ -736,8 +1150,31 @@ classes = [
 def register():
     for cls in classes:
         bpy.utils.register_class(cls)
+    bpy.types.WindowManager.custom_utils_gn_network_selection_items = CollectionProperty(
+        type=CUSTOMUTILS_PG_gn_network_selection_item
+    )
+    bpy.types.WindowManager.custom_utils_gn_network_selection_index = IntProperty(default=0)
+    bpy.types.WindowManager.custom_utils_gn_parameter_selection_items = CollectionProperty(
+        type=CUSTOMUTILS_PG_gn_parameter_selection_item
+    )
+    bpy.types.WindowManager.custom_utils_gn_parameter_selection_index = IntProperty(default=0)
+    bpy.types.WindowManager.custom_utils_gn_match_network_items = CollectionProperty(
+        type=CUSTOMUTILS_PG_gn_match_network_item
+    )
+    bpy.types.WindowManager.custom_utils_gn_match_network_index = IntProperty(default=0)
     
 def unregister():
-    for cls in classes:
+    for prop_name in (
+        "custom_utils_gn_network_selection_items",
+        "custom_utils_gn_network_selection_index",
+        "custom_utils_gn_parameter_selection_items",
+        "custom_utils_gn_parameter_selection_index",
+        "custom_utils_gn_match_network_items",
+        "custom_utils_gn_match_network_index",
+    ):
+        if hasattr(bpy.types.WindowManager, prop_name):
+            delattr(bpy.types.WindowManager, prop_name)
+
+    for cls in reversed(classes):
         bpy.utils.unregister_class(cls)
     

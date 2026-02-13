@@ -1,5 +1,65 @@
 import bpy
+from bpy.props import BoolProperty
 """UI menus and keymaps for the Custom Utilities Blender addon."""
+
+ADDON_PREFERENCES_ID = __package__ if __package__ else __name__.split(".")[0]
+
+PIE_OPERATOR_SPECS = [
+    ("pie_show_measure_surface_point", "object.measure_surface_point", "Measure Surface Point", True),
+    ("pie_show_copy_transformations", "object.copy_transformations", "Copy Transformations", True),
+    ("pie_show_paste_transformations", "object.paste_transformations", "Paste Transformations", True),
+    ("pie_show_copy_geometry_nodes_attributes", "object.copy_geometry_nodes_modifier_attributes", "Copy Geometry Nodes Attributes", True),
+    ("pie_show_paste_geometry_nodes_attributes", "object.paste_geometry_nodes_modifier_attributes", "Paste Geometry Nodes Attributes", True),
+    ("pie_show_select_matching_geometry_nodes", "object.select_objects_with_matching_geometry_nodes", "Select Matching Geometry Nodes Objects", False),
+    ("pie_show_set_origin_to_bottom_center", "object.set_origin_to_bottom_center", "Set Origin to Bottom", True),
+    ("pie_show_remove_duplicate_materials", "object.remove_duplicate_materials", "Remove Duplicate Materials", True),
+    ("pie_show_move_selected_to_collection", "object.move_selected_to_collection", "Move to Collection", True),
+    ("pie_show_clear_transformations_clipboard", "object.clear_transformations_clipboard", "Clear Transformations", False),
+    ("pie_show_reload_all_images", "image.reload_all_images", "Reload All Images", False),
+    ("pie_show_edit_instanced_collection", "collection.edit_instanced_collection", "Edit Collection", False),
+]
+
+
+def _get_addon_preferences(context: bpy.types.Context):
+    preferences = getattr(context, "preferences", None)
+    if preferences is None:
+        return None
+
+    addons = preferences.addons
+    addon = addons.get(ADDON_PREFERENCES_ID)
+    if addon is not None:
+        return addon.preferences
+
+    root_name = __name__.split(".")[0]
+    addon = addons.get(root_name)
+    if addon is not None:
+        return addon.preferences
+
+    return None
+
+
+class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
+    bl_idname = ADDON_PREFERENCES_ID
+
+    pie_show_measure_surface_point: BoolProperty(name="Measure Surface Point", default=True)
+    pie_show_copy_transformations: BoolProperty(name="Copy Transformations", default=True)
+    pie_show_paste_transformations: BoolProperty(name="Paste Transformations", default=True)
+    pie_show_copy_geometry_nodes_attributes: BoolProperty(name="Copy Geometry Nodes Attributes", default=True)
+    pie_show_paste_geometry_nodes_attributes: BoolProperty(name="Paste Geometry Nodes Attributes", default=True)
+    pie_show_select_matching_geometry_nodes: BoolProperty(name="Select Matching Geometry Nodes Objects", default=False)
+    pie_show_set_origin_to_bottom_center: BoolProperty(name="Set Origin to Bottom", default=True)
+    pie_show_remove_duplicate_materials: BoolProperty(name="Remove Duplicate Materials", default=True)
+    pie_show_move_selected_to_collection: BoolProperty(name="Move to Collection", default=True)
+    pie_show_clear_transformations_clipboard: BoolProperty(name="Clear Transformations", default=False)
+    pie_show_reload_all_images: BoolProperty(name="Reload All Images", default=False)
+    pie_show_edit_instanced_collection: BoolProperty(name="Edit Collection", default=False)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.label(text="Pie Menu Operators")
+        for prop_name, _idname, label, _default in PIE_OPERATOR_SPECS:
+            layout.prop(self, prop_name, text=label)
+        layout.label(text="Only the first 8 enabled operators are shown in the pie menu.")
 
 # This class defines the dropdown menu
 class UtilitiesMenu(bpy.types.Menu):
@@ -13,6 +73,9 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.copy_transformations", text="Copy Transformations")
         layout.operator("object.paste_transformations", text="Paste Transformations")
         layout.operator("object.clear_transformations_clipboard", text="Clear Transformations")
+        layout.operator("object.copy_geometry_nodes_modifier_attributes", text="Copy Geometry Nodes Attributes")
+        layout.operator("object.paste_geometry_nodes_modifier_attributes", text="Paste Geometry Nodes Attributes")
+        layout.operator("object.select_objects_with_matching_geometry_nodes", text="Select Matching Geometry Nodes Objects")
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         layout.operator("image.reload_all_images", text="Reload All Images")
@@ -32,20 +95,25 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
     bl_description = "Custom Utilities pie menu"
 
     def draw(self, context):
-        pie = self.layout.menu_pie()
-        pie.operator("object.measure_surface_point", text="Measure Surface Point")
-        pie.operator("object.copy_transformations", text="Copy Transformations")
-        pie.operator("object.paste_transformations", text="Paste Transformations")
-        pie.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
-        pie.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
-        pie.operator("image.reload_all_images", text="Reload All Images")
-        pie.operator("object.move_selected_to_collection", text="Move to Collection")
+        preferences = _get_addon_preferences(context)
+        enabled_specs = []
+        for prop_name, idname, label, default in PIE_OPERATOR_SPECS:
+            enabled = getattr(preferences, prop_name, default) if preferences else default
+            if enabled:
+                enabled_specs.append((idname, label))
 
-        # Edit/Close Collection toggle in pie menu
-        scene = context.scene
-        is_editing = bool(scene.get("custom_utils_edit_collection_name"))
-        label = "Close Collection" if is_editing else "Edit Collection"
-        pie.operator("collection.edit_instanced_collection", text=label)
+        pie = self.layout.menu_pie()
+        for idx in range(8):
+            if idx >= len(enabled_specs):
+                pie.separator()
+                continue
+
+            idname, label = enabled_specs[idx]
+            if idname == "collection.edit_instanced_collection":
+                scene = context.scene
+                is_editing = bool(scene.get("custom_utils_edit_collection_name"))
+                label = "Close Collection" if is_editing else "Edit Collection"
+            pie.operator(idname, text=label)
 
 # This function adds the menu to the toolbar
 def draw_func(self, context):
@@ -57,6 +125,7 @@ addon_keymaps = []
 
 # Registration
 def register():
+    bpy.utils.register_class(CustomUtilitiesPreferences)
     bpy.utils.register_class(UtilitiesMenu)
     bpy.utils.register_class(VIEW3D_MT_pie_utilities)
     # Ensure the draw function is not appended twice
@@ -91,11 +160,20 @@ def register():
 
 # Unregistration
 def unregister():
-    bpy.utils.unregister_class(UtilitiesMenu)
     bpy.utils.unregister_class(VIEW3D_MT_pie_utilities)
-    bpy.types.VIEW3D_MT_editor_menus.remove(draw_func)
+    bpy.utils.unregister_class(UtilitiesMenu)
+    bpy.utils.unregister_class(CustomUtilitiesPreferences)
+    try:
+        bpy.types.VIEW3D_MT_editor_menus.remove(draw_func)
+    except Exception:
+        pass
     
     # Unregister the pie menu keymap
     for km in addon_keymaps:
-        bpy.context.window_manager.keyconfigs.addon.keymaps.remove(km)
+        try:
+            keyconfigs = bpy.context.window_manager.keyconfigs.addon
+            if keyconfigs is not None:
+                keyconfigs.keymaps.remove(km)
+        except Exception:
+            pass
     del addon_keymaps[:]
