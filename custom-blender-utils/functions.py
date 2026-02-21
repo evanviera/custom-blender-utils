@@ -6,6 +6,9 @@ measuring distances, handling mouse clicks/raycast, transformation clipboard
 operations, and origin adjustments.
 """
 
+import json
+import os
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 from mathutils import Vector, Color, Euler, Quaternion
 from bpy_extras import view3d_utils
@@ -386,6 +389,19 @@ def _node_group_identity(node_group: bpy.types.NodeTree) -> Dict[str, Any]:
     }
 
 
+def _node_tree_identity(node_tree: bpy.types.NodeTree) -> Dict[str, Any]:
+    session_uid = getattr(node_tree, 'session_uid', None)
+    library_path = node_tree.library.filepath if node_tree.library else ''
+    key = f"{node_tree.name}|{session_uid if session_uid is not None else 'no_session_uid'}|{library_path}|{node_tree.bl_idname}"
+    return {
+        'key': key,
+        'name': node_tree.name,
+        'session_uid': session_uid,
+        'library': library_path,
+        'bl_idname': node_tree.bl_idname,
+    }
+
+
 def get_geometry_nodes_modifier_group_keys(obj: bpy.types.Object) -> List[str]:
     """Return Geometry Nodes node-group identity keys used by an object's modifiers."""
     keys: List[str] = []
@@ -432,6 +448,299 @@ def get_object_geometry_nodes_network_choices(obj: bpy.types.Object) -> List[Dic
             }
         )
     return choices
+
+
+def get_object_geometry_nodes_network_enum_items(obj: bpy.types.Object) -> List[Tuple[str, str, str]]:
+    """Return EnumProperty-compatible network choices for an object's GN modifiers."""
+    items: List[Tuple[str, str, str]] = []
+    for choice in get_object_geometry_nodes_network_choices(obj):
+        group_key = choice.get('group_key', '')
+        label = choice.get('label', choice.get('name', group_key))
+        name = choice.get('name', label)
+        count = int(choice.get('count', 0) or 0)
+        description = f"Geometry Nodes network '{name}'"
+        if count > 1:
+            description += f" used by {count} modifiers"
+        items.append((group_key, label, description))
+    return items
+
+
+def _to_json_safe_value(value: Any) -> Any:
+    """Convert bpy values to JSON-safe primitives."""
+    if isinstance(value, bpy.types.ID):
+        return {
+            '__id_ref__': True,
+            'id_type': getattr(value, 'id_type', None),
+            'name': value.name,
+            'library': value.library.filepath if value.library else '',
+        }
+
+    if isinstance(value, (bool, int, float, str)) or value is None:
+        return value
+
+    if isinstance(value, (Vector, Color, Euler, Quaternion)):
+        return list(value)
+
+    if isinstance(value, dict):
+        out = {}
+        for key, item in value.items():
+            serialized = _to_json_safe_value(item)
+            if serialized is _UNSUPPORTED:
+                continue
+            out[str(key)] = serialized
+        return out
+
+    if isinstance(value, (list, tuple)):
+        out = []
+        for item in value:
+            serialized = _to_json_safe_value(item)
+            if serialized is _UNSUPPORTED:
+                return _UNSUPPORTED
+            out.append(serialized)
+        return out
+
+    if hasattr(value, 'to_list'):
+        try:
+            return value.to_list()
+        except Exception:
+            return _UNSUPPORTED
+
+    try:
+        as_tuple = tuple(value)
+    except TypeError:
+        return _UNSUPPORTED
+
+    out = []
+    for item in as_tuple:
+        serialized = _to_json_safe_value(item)
+        if serialized is _UNSUPPORTED:
+            return _UNSUPPORTED
+        out.append(serialized)
+    return out
+
+
+def _serialize_node_socket(socket: bpy.types.NodeSocket) -> Dict[str, Any]:
+    socket_data = {
+        'name': socket.name,
+        'identifier': getattr(socket, 'identifier', ''),
+        'type': getattr(socket, 'type', ''),
+        'bl_idname': getattr(socket, 'bl_idname', ''),
+    }
+
+    if hasattr(socket, 'default_value'):
+        try:
+            default_value = _to_json_safe_value(socket.default_value)
+            if default_value is not _UNSUPPORTED:
+                socket_data['default_value'] = default_value
+        except Exception:
+            pass
+
+    return socket_data
+
+
+def _capture_node_runtime_properties(node: bpy.types.Node) -> Dict[str, Any]:
+    props: Dict[str, Any] = {}
+    if not hasattr(node, "bl_rna") or not hasattr(node.bl_rna, "properties"):
+        return props
+
+    for prop in node.bl_rna.properties:
+        prop_name = getattr(prop, "identifier", "")
+        if not prop_name or prop_name in {"rna_type", "name", "location"}:
+            continue
+        if getattr(prop, "is_readonly", False):
+            continue
+        if getattr(prop, "is_hidden", False):
+            continue
+        try:
+            value = getattr(node, prop_name)
+        except Exception:
+            continue
+        serialized = _to_json_safe_value(value)
+        if serialized is _UNSUPPORTED:
+            continue
+        props[prop_name] = serialized
+
+    for key in node.keys():
+        if key == "_RNA_UI":
+            continue
+        try:
+            value = node[key]
+        except Exception:
+            continue
+        serialized = _to_json_safe_value(value)
+        if serialized is _UNSUPPORTED:
+            continue
+        props[f"idprop:{key}"] = serialized
+
+    return props
+
+
+def _capture_tree_interface(node_tree: bpy.types.NodeTree) -> Dict[str, List[Dict[str, Any]]]:
+    interface_data = {
+        'inputs': [],
+        'outputs': [],
+    }
+    interface = getattr(node_tree, "interface", None)
+    items_tree = getattr(interface, "items_tree", None) if interface is not None else None
+    if items_tree is None:
+        return interface_data
+
+    for item in items_tree:
+        if getattr(item, "item_type", "") != "SOCKET":
+            continue
+        socket_info = {
+            'name': getattr(item, "name", ""),
+            'identifier': getattr(item, "identifier", ""),
+            'socket_type': getattr(item, "socket_type", ""),
+            'in_out': getattr(item, "in_out", ""),
+        }
+        default_attribute_name = getattr(item, "default_attribute_name", None)
+        if default_attribute_name not in (None, ""):
+            socket_info['default_attribute_name'] = default_attribute_name
+
+        if socket_info['in_out'] == "INPUT":
+            interface_data['inputs'].append(socket_info)
+        elif socket_info['in_out'] == "OUTPUT":
+            interface_data['outputs'].append(socket_info)
+
+    return interface_data
+
+
+def _serialize_node_tree_recursive(
+    node_tree: bpy.types.NodeTree,
+    groups: Dict[str, Dict[str, Any]],
+) -> str:
+    identity = _node_tree_identity(node_tree)
+    group_key = identity['key']
+
+    if group_key in groups:
+        return group_key
+
+    nodes_data: List[Dict[str, Any]] = []
+    links_data: List[Dict[str, Any]] = []
+    nested_group_keys: List[str] = []
+    nested_seen: Set[str] = set()
+
+    for node in node_tree.nodes:
+        node_data = {
+            'name': node.name,
+            'label': node.label,
+            'bl_idname': node.bl_idname,
+            'type': node.type,
+            'mute': bool(getattr(node, "mute", False)),
+            'hide': bool(getattr(node, "hide", False)),
+            'location': [float(node.location[0]), float(node.location[1])],
+            'width': float(getattr(node, "width", 0.0)),
+            'height': float(getattr(node, "height", 0.0)),
+            'parent': node.parent.name if getattr(node, "parent", None) else None,
+            'inputs': [_serialize_node_socket(sock) for sock in node.inputs],
+            'outputs': [_serialize_node_socket(sock) for sock in node.outputs],
+            'properties': _capture_node_runtime_properties(node),
+        }
+
+        child_tree = getattr(node, "node_tree", None)
+        if isinstance(child_tree, bpy.types.NodeTree):
+            child_key = _serialize_node_tree_recursive(child_tree, groups)
+            node_data['node_tree_key'] = child_key
+            if child_key not in nested_seen:
+                nested_seen.add(child_key)
+                nested_group_keys.append(child_key)
+
+        nodes_data.append(node_data)
+
+    for link in node_tree.links:
+        links_data.append(
+            {
+                'from_node': link.from_node.name if link.from_node else "",
+                'from_socket': link.from_socket.name if link.from_socket else "",
+                'from_socket_identifier': getattr(link.from_socket, "identifier", "") if link.from_socket else "",
+                'to_node': link.to_node.name if link.to_node else "",
+                'to_socket': link.to_socket.name if link.to_socket else "",
+                'to_socket_identifier': getattr(link.to_socket, "identifier", "") if link.to_socket else "",
+            }
+        )
+
+    groups[group_key] = {
+        'identity': identity,
+        'interface': _capture_tree_interface(node_tree),
+        'nodes': nodes_data,
+        'links': links_data,
+        'nested_group_keys': nested_group_keys,
+    }
+    return group_key
+
+
+def _sanitize_filename(name: str) -> str:
+    cleaned = "".join(ch if ch.isalnum() or ch in {"-", "_"} else "_" for ch in name)
+    cleaned = cleaned.strip("_")
+    return cleaned or "geometry_nodes_network"
+
+
+def get_default_geometry_nodes_export_filepath(node_group_name: str) -> str:
+    """Return a default JSON path for GN export based on the current blend path."""
+    blend_path = bpy.data.filepath
+    if blend_path:
+        base_dir = os.path.dirname(blend_path)
+    else:
+        base_dir = os.path.expanduser("~")
+    filename = f"{_sanitize_filename(node_group_name)}.json"
+    return os.path.join(base_dir, filename)
+
+
+def export_geometry_nodes_network_to_json(
+    obj: bpy.types.Object,
+    group_key: str,
+    filepath: str,
+) -> Dict[str, Any]:
+    """Export one GN network from an object to JSON, recursively including nested groups."""
+    if obj is None:
+        raise ValueError("No source object provided")
+
+    target_group = None
+    for modifier in obj.modifiers:
+        if modifier.type != 'NODES' or modifier.node_group is None:
+            continue
+        identity_key = _node_group_identity(modifier.node_group)['key']
+        if identity_key == group_key:
+            target_group = modifier.node_group
+            break
+
+    if target_group is None:
+        raise ValueError("Selected Geometry Nodes network was not found on the active object")
+
+    groups: Dict[str, Dict[str, Any]] = {}
+    root_key = _serialize_node_tree_recursive(target_group, groups)
+
+    export_data: Dict[str, Any] = {
+        'schema_version': 1,
+        'exported_at_utc': datetime.now(timezone.utc).isoformat(),
+        'source_object': {
+            'name': obj.name,
+            'type': obj.type,
+        },
+        'root_group_key': root_key,
+        'groups': groups,
+    }
+
+    resolved_path = bpy.path.abspath(filepath)
+    if not resolved_path.lower().endswith(".json"):
+        resolved_path = f"{resolved_path}.json"
+    out_dir = os.path.dirname(resolved_path)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+
+    with open(resolved_path, "w", encoding="utf-8") as handle:
+        json.dump(export_data, handle, indent=2)
+
+    node_count = sum(len(group_data.get('nodes', [])) for group_data in groups.values())
+    link_count = sum(len(group_data.get('links', [])) for group_data in groups.values())
+    return {
+        'filepath': resolved_path,
+        'root_group_name': target_group.name,
+        'group_count': len(groups),
+        'node_count': node_count,
+        'link_count': link_count,
+    }
 
 
 def _capture_modifier_settings(modifier: bpy.types.Modifier) -> Dict[str, Any]:

@@ -76,6 +76,7 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.copy_geometry_nodes_modifier_attributes", text="Copy Geometry Nodes Attributes")
         layout.operator("object.paste_geometry_nodes_modifier_attributes", text="Paste Geometry Nodes Attributes")
         layout.operator("object.select_objects_with_matching_geometry_nodes", text="Select Matching Geometry Nodes Objects")
+        layout.operator("object.export_geometry_nodes_network_to_json", text="Export Geometry Nodes Network (JSON)")
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         layout.operator("image.reload_all_images", text="Reload All Images")

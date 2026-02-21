@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blender Addon 4.5+ Expert"
+  short_description: "Build robust Blender 4.5+ Python add-ons quickly."
+  default_prompt: "Use $blender-addon-dev-45-plus to implement and review a Blender 4.5+ add-on feature."

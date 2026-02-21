@@ -461,6 +461,116 @@ class SelectObjectsWithMatchingGeometryNodesOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ExportGeometryNodesNetworkToJSONOperator(bpy.types.Operator):
+    bl_idname = "object.export_geometry_nodes_network_to_json"
+    bl_label = "Export Geometry Nodes Network (JSON)"
+    bl_description = (
+        "Export one Geometry Nodes network from the active object to JSON, "
+        "including nested node groups recursively"
+    )
+    bl_options = {"INTERNAL"}
+
+    @classmethod
+    def poll(cls, context):
+        active_obj = context.active_object
+        if active_obj is None:
+            return False
+        for modifier in active_obj.modifiers:
+            if modifier.type == 'NODES' and modifier.node_group is not None:
+                return True
+        return False
+
+    def _network_items(self, context):
+        active_obj = context.active_object
+        if active_obj is None:
+            return []
+        return fn.get_object_geometry_nodes_network_enum_items(active_obj)
+
+    network_key: EnumProperty(
+        name="Geometry Nodes Network",
+        description="Choose which Geometry Nodes network to export from the active object",
+        items=_network_items,
+    )
+
+    filepath: StringProperty(
+        name="Filepath",
+        description="Output path for the exported JSON file",
+        subtype='FILE_PATH',
+        default="",
+    )
+
+    def invoke(self, context, event):
+        active_obj = context.active_object
+        if active_obj is None:
+            self.report({'WARNING'}, "No active object")
+            return {'CANCELLED'}
+
+        choices = fn.get_object_geometry_nodes_network_choices(active_obj)
+        if not choices:
+            self.report({'WARNING'}, f"Active object '{active_obj.name}' has no Geometry Nodes modifiers")
+            return {'CANCELLED'}
+
+        valid_keys = {choice.get('group_key', '') for choice in choices}
+        if not self.network_key or self.network_key not in valid_keys:
+            self.network_key = choices[0].get('group_key', '')
+
+        if not self.filepath:
+            selected_name = choices[0].get('name', 'geometry_nodes_network')
+            for choice in choices:
+                if choice.get('group_key', '') == self.network_key:
+                    selected_name = choice.get('name', selected_name)
+                    break
+            self.filepath = fn.get_default_geometry_nodes_export_filepath(selected_name)
+
+        return context.window_manager.invoke_props_dialog(self, width=620)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "network_key", text="Network")
+        layout.prop(self, "filepath")
+        layout.label(text="Includes nested node groups recursively.")
+
+    def execute(self, context):
+        active_obj = context.active_object
+        if active_obj is None:
+            self.report({'WARNING'}, "No active object")
+            return {'CANCELLED'}
+
+        if not self.network_key:
+            self.report({'WARNING'}, "No Geometry Nodes network selected")
+            return {'CANCELLED'}
+
+        if not self.filepath.strip():
+            self.report({'WARNING'}, "No export filepath provided")
+            return {'CANCELLED'}
+
+        try:
+            stats = fn.export_geometry_nodes_network_to_json(
+                active_obj,
+                self.network_key,
+                self.filepath,
+            )
+        except ValueError as exc:
+            self.report({'WARNING'}, str(exc))
+            return {'CANCELLED'}
+        except OSError as exc:
+            self.report({'ERROR'}, f"Failed to write JSON file: {exc}")
+            return {'CANCELLED'}
+        except Exception as exc:
+            self.report({'ERROR'}, f"Unexpected export error: {exc}")
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            (
+                f"Exported '{stats.get('root_group_name', 'network')}' to '{stats.get('filepath', self.filepath)}' "
+                f"with {stats.get('group_count', 0)} node group(s), {stats.get('node_count', 0)} node(s), "
+                f"and {stats.get('link_count', 0)} link(s)"
+            ),
+        )
+        return {'FINISHED'}
+
+
 class SetOriginToBottomCenterOperator(bpy.types.Operator):
     bl_idname = "object.set_origin_to_bottom_center"
     bl_label = "Set Origin to Bottom Center"
@@ -1140,6 +1250,7 @@ classes = [
     CopyGeometryNodesModifierAttributesOperator,
     PasteGeometryNodesModifierAttributesOperator,
     SelectObjectsWithMatchingGeometryNodesOperator,
+    ExportGeometryNodesNetworkToJSONOperator,
     SetOriginToBottomCenterOperator,
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
