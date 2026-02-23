@@ -662,6 +662,10 @@ def _serialize_node_tree_recursive(
 
     groups[group_key] = {
         'identity': identity,
+        'tree_flags': {
+            'is_modifier': bool(getattr(node_tree, "is_modifier", False)),
+            'is_tool': bool(getattr(node_tree, "is_tool", False)),
+        },
         'interface': _capture_tree_interface(node_tree),
         'nodes': nodes_data,
         'links': links_data,
@@ -1108,6 +1112,30 @@ def import_geometry_nodes_network_from_json(
         in_progress,
         stats,
     )
+
+    root_group_data = groups_data.get(root_group_key, {})
+    root_flags = root_group_data.get('tree_flags', {}) if isinstance(root_group_data, dict) else {}
+    # Exported files before this importer patch won't have tree_flags.
+    # In that case, force modifier-compat on the imported root group.
+    if hasattr(root_tree, "is_modifier"):
+        try:
+            root_tree.is_modifier = bool(root_flags.get('is_modifier', True))
+        except Exception:
+            pass
+    if hasattr(root_tree, "is_tool"):
+        try:
+            root_tree.is_tool = bool(root_flags.get('is_tool', False))
+        except Exception:
+            pass
+    if hasattr(root_tree, "interface_update"):
+        try:
+            root_tree.interface_update(bpy.context)
+        except Exception:
+            pass
+    try:
+        root_tree.update_tag()
+    except Exception:
+        pass
 
     attached_modifier = False
     modifier_name = ""
