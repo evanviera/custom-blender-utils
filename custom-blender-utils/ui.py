@@ -11,6 +11,8 @@ PIE_OPERATOR_SPECS = [
     ("pie_show_copy_geometry_nodes_attributes", "object.copy_geometry_nodes_modifier_attributes", "Copy Geometry Nodes Attributes", True),
     ("pie_show_paste_geometry_nodes_attributes", "object.paste_geometry_nodes_modifier_attributes", "Paste Geometry Nodes Attributes", True),
     ("pie_show_select_matching_geometry_nodes", "object.select_objects_with_matching_geometry_nodes", "Select Matching Geometry Nodes Objects", False),
+    ("pie_show_export_geometry_nodes_json", "object.export_geometry_nodes_network_to_json", "Export Geometry Nodes Network (JSON)", False),
+    ("pie_show_import_geometry_nodes_json", "object.import_geometry_nodes_network_from_json", "Import Geometry Nodes Network (JSON)", False),
     ("pie_show_set_origin_to_bottom_center", "object.set_origin_to_bottom_center", "Set Origin to Bottom", True),
     ("pie_show_remove_duplicate_materials", "object.remove_duplicate_materials", "Remove Duplicate Materials", True),
     ("pie_show_move_selected_to_collection", "object.move_selected_to_collection", "Move to Collection", True),
@@ -47,6 +49,8 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
     pie_show_copy_geometry_nodes_attributes: BoolProperty(name="Copy Geometry Nodes Attributes", default=True)
     pie_show_paste_geometry_nodes_attributes: BoolProperty(name="Paste Geometry Nodes Attributes", default=True)
     pie_show_select_matching_geometry_nodes: BoolProperty(name="Select Matching Geometry Nodes Objects", default=False)
+    pie_show_export_geometry_nodes_json: BoolProperty(name="Export Geometry Nodes Network (JSON)", default=False)
+    pie_show_import_geometry_nodes_json: BoolProperty(name="Import Geometry Nodes Network (JSON)", default=False)
     pie_show_set_origin_to_bottom_center: BoolProperty(name="Set Origin to Bottom", default=True)
     pie_show_remove_duplicate_materials: BoolProperty(name="Remove Duplicate Materials", default=True)
     pie_show_move_selected_to_collection: BoolProperty(name="Move to Collection", default=True)
@@ -77,6 +81,7 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.paste_geometry_nodes_modifier_attributes", text="Paste Geometry Nodes Attributes")
         layout.operator("object.select_objects_with_matching_geometry_nodes", text="Select Matching Geometry Nodes Objects")
         layout.operator("object.export_geometry_nodes_network_to_json", text="Export Geometry Nodes Network (JSON)")
+        layout.operator("object.import_geometry_nodes_network_from_json", text="Import Geometry Nodes Network (JSON)")
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         layout.operator("image.reload_all_images", text="Reload All Images")

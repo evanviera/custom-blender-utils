@@ -743,6 +743,415 @@ def export_geometry_nodes_network_to_json(
     }
 
 
+def _clear_node_tree_contents(node_tree: bpy.types.NodeTree) -> None:
+    for link in list(node_tree.links):
+        try:
+            node_tree.links.remove(link)
+        except Exception:
+            pass
+
+    for node in list(node_tree.nodes):
+        try:
+            node_tree.nodes.remove(node)
+        except Exception:
+            pass
+
+    interface = getattr(node_tree, "interface", None)
+    items_tree = getattr(interface, "items_tree", None) if interface is not None else None
+    if interface is None or items_tree is None:
+        return
+
+    for item in list(items_tree):
+        try:
+            interface.remove(item)
+        except Exception:
+            pass
+
+
+def _import_tree_interface(
+    node_tree: bpy.types.NodeTree,
+    interface_data: Dict[str, Any],
+) -> None:
+    interface = getattr(node_tree, "interface", None)
+    if interface is None:
+        return
+
+    for socket_info in interface_data.get('inputs', []):
+        socket_type = socket_info.get('socket_type') or 'NodeSocketFloat'
+        name = socket_info.get('name') or "Input"
+        try:
+            socket_item = interface.new_socket(name=name, in_out='INPUT', socket_type=socket_type)
+        except Exception:
+            continue
+        default_attribute_name = socket_info.get('default_attribute_name')
+        if default_attribute_name not in (None, "") and hasattr(socket_item, "default_attribute_name"):
+            try:
+                socket_item.default_attribute_name = default_attribute_name
+            except Exception:
+                pass
+
+    for socket_info in interface_data.get('outputs', []):
+        socket_type = socket_info.get('socket_type') or 'NodeSocketFloat'
+        name = socket_info.get('name') or "Output"
+        try:
+            interface.new_socket(name=name, in_out='OUTPUT', socket_type=socket_type)
+        except Exception:
+            continue
+
+
+def _find_socket_by_identity(
+    sockets: Any,
+    identifier: str,
+    name: str,
+) -> Optional[bpy.types.NodeSocket]:
+    if identifier:
+        for socket in sockets:
+            if getattr(socket, "identifier", "") == identifier:
+                return socket
+
+    if name:
+        for socket in sockets:
+            if socket.name == name:
+                return socket
+    return None
+
+
+def _assign_socket_default(socket: bpy.types.NodeSocket, value: Any) -> bool:
+    try:
+        socket.default_value = value
+        return True
+    except Exception:
+        if isinstance(value, list):
+            try:
+                socket.default_value = tuple(value)
+                return True
+            except Exception:
+                return False
+        return False
+
+
+def _assign_node_property(node: bpy.types.Node, prop_name: str, value: Any) -> bool:
+    try:
+        setattr(node, prop_name, value)
+        return True
+    except Exception:
+        if isinstance(value, list):
+            try:
+                setattr(node, prop_name, tuple(value))
+                return True
+            except Exception:
+                return False
+        return False
+
+
+def _assign_node_idprop(node: bpy.types.Node, key: str, value: Any) -> bool:
+    try:
+        node[key] = value
+        return True
+    except Exception:
+        if isinstance(value, list):
+            try:
+                node[key] = tuple(value)
+                return True
+            except Exception:
+                return False
+        return False
+
+
+def _restore_node_runtime_properties(
+    node: bpy.types.Node,
+    properties: Dict[str, Any],
+    stats: Dict[str, int],
+) -> None:
+    for prop_name, stored_value in properties.items():
+        value = _deserialize_value(stored_value)
+        if value is None and isinstance(stored_value, dict) and stored_value.get('__id_ref__'):
+            stats['skipped_values'] += 1
+            continue
+
+        if prop_name.startswith("idprop:"):
+            idprop_key = prop_name.split(":", 1)[1]
+            if _assign_node_idprop(node, idprop_key, value):
+                stats['applied_values'] += 1
+            else:
+                stats['skipped_values'] += 1
+            continue
+
+        if _assign_node_property(node, prop_name, value):
+            stats['applied_values'] += 1
+        else:
+            stats['skipped_values'] += 1
+
+
+def _restore_node_socket_defaults(
+    node: bpy.types.Node,
+    sockets_data: List[Dict[str, Any]],
+    is_input: bool,
+    stats: Dict[str, int],
+) -> None:
+    sockets = node.inputs if is_input else node.outputs
+    for socket_data in sockets_data:
+        if 'default_value' not in socket_data:
+            continue
+
+        socket = _find_socket_by_identity(
+            sockets,
+            socket_data.get('identifier', ''),
+            socket_data.get('name', ''),
+        )
+        if socket is None or not hasattr(socket, 'default_value'):
+            stats['skipped_values'] += 1
+            continue
+
+        stored_value = socket_data.get('default_value')
+        value = _deserialize_value(stored_value)
+        if value is None and isinstance(stored_value, dict) and stored_value.get('__id_ref__'):
+            stats['skipped_values'] += 1
+            continue
+
+        if _assign_socket_default(socket, value):
+            stats['applied_values'] += 1
+        else:
+            stats['skipped_values'] += 1
+
+
+def _import_node_tree_recursive(
+    group_key: str,
+    groups_data: Dict[str, Dict[str, Any]],
+    cache: Dict[str, bpy.types.NodeTree],
+    in_progress: Set[str],
+    stats: Dict[str, int],
+) -> bpy.types.NodeTree:
+    if group_key in cache:
+        return cache[group_key]
+
+    group_data = groups_data.get(group_key)
+    if not isinstance(group_data, dict):
+        raise ValueError(f"Missing group data for key '{group_key}'")
+
+    identity = group_data.get('identity', {})
+    group_name = identity.get('name') or "Imported_GeometryNodes"
+    tree_type = identity.get('bl_idname') or "GeometryNodeTree"
+
+    try:
+        node_tree = bpy.data.node_groups.new(name=group_name, type=tree_type)
+    except Exception:
+        node_tree = bpy.data.node_groups.new(name=group_name, type="GeometryNodeTree")
+
+    cache[group_key] = node_tree
+    in_progress.add(group_key)
+    stats['group_count'] += 1
+
+    _clear_node_tree_contents(node_tree)
+    _import_tree_interface(node_tree, group_data.get('interface', {}))
+
+    created_nodes: Dict[str, bpy.types.Node] = {}
+    node_payload: Dict[str, Dict[str, Any]] = {}
+    for node_data in group_data.get('nodes', []):
+        bl_idname = node_data.get('bl_idname', '')
+        if not bl_idname:
+            stats['skipped_nodes'] += 1
+            continue
+
+        try:
+            node = node_tree.nodes.new(type=bl_idname)
+        except Exception:
+            stats['skipped_nodes'] += 1
+            continue
+
+        source_name = node_data.get('name', node.name)
+        try:
+            if source_name:
+                node.name = source_name
+        except Exception:
+            pass
+        try:
+            node.label = node_data.get('label', "")
+        except Exception:
+            pass
+        try:
+            node.mute = bool(node_data.get('mute', False))
+        except Exception:
+            pass
+        try:
+            node.hide = bool(node_data.get('hide', False))
+        except Exception:
+            pass
+        try:
+            location = node_data.get('location', [0.0, 0.0])
+            if isinstance(location, list) and len(location) >= 2:
+                node.location = (float(location[0]), float(location[1]))
+        except Exception:
+            pass
+        try:
+            node.width = float(node_data.get('width', node.width))
+        except Exception:
+            pass
+
+        child_key = node_data.get('node_tree_key')
+        if child_key and child_key in groups_data and hasattr(node, "node_tree"):
+            try:
+                child_tree = _import_node_tree_recursive(
+                    child_key,
+                    groups_data,
+                    cache,
+                    in_progress,
+                    stats,
+                )
+                node.node_tree = child_tree
+            except Exception:
+                stats['skipped_values'] += 1
+
+        _restore_node_runtime_properties(node, node_data.get('properties', {}), stats)
+        _restore_node_socket_defaults(node, node_data.get('inputs', []), True, stats)
+
+        created_nodes[source_name] = node
+        node_payload[source_name] = node_data
+        stats['node_count'] += 1
+
+    for source_name, node in created_nodes.items():
+        parent_name = node_payload.get(source_name, {}).get('parent')
+        if not parent_name:
+            continue
+        parent = created_nodes.get(parent_name)
+        if parent is None:
+            continue
+        try:
+            node.parent = parent
+        except Exception:
+            stats['skipped_values'] += 1
+
+    for link_data in group_data.get('links', []):
+        from_node = created_nodes.get(link_data.get('from_node', ''))
+        to_node = created_nodes.get(link_data.get('to_node', ''))
+        if from_node is None or to_node is None:
+            stats['skipped_links'] += 1
+            continue
+
+        from_socket = _find_socket_by_identity(
+            from_node.outputs,
+            link_data.get('from_socket_identifier', ''),
+            link_data.get('from_socket', ''),
+        )
+        to_socket = _find_socket_by_identity(
+            to_node.inputs,
+            link_data.get('to_socket_identifier', ''),
+            link_data.get('to_socket', ''),
+        )
+        if from_socket is None or to_socket is None:
+            stats['skipped_links'] += 1
+            continue
+
+        try:
+            node_tree.links.new(from_socket, to_socket)
+            stats['link_count'] += 1
+        except Exception:
+            stats['skipped_links'] += 1
+
+    in_progress.discard(group_key)
+    try:
+        node_tree.update_tag()
+    except Exception:
+        pass
+    return node_tree
+
+
+def import_geometry_nodes_network_from_json(
+    filepath: str,
+    target_object: Optional[bpy.types.Object] = None,
+    attach_to_active_object: bool = True,
+) -> Dict[str, Any]:
+    """Import a Geometry Nodes network JSON export into node groups and optionally attach it."""
+    resolved_path = bpy.path.abspath(filepath)
+    if not os.path.exists(resolved_path):
+        raise ValueError(f"JSON file not found: {resolved_path}")
+
+    try:
+        with open(resolved_path, "r", encoding="utf-8") as handle:
+            data = json.load(handle)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSON file: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("Invalid JSON root; expected an object")
+
+    schema_version = data.get('schema_version')
+    if schema_version != 1:
+        raise ValueError(f"Unsupported schema_version '{schema_version}'; expected 1")
+
+    groups_data = data.get('groups')
+    if not isinstance(groups_data, dict) or not groups_data:
+        raise ValueError("JSON does not contain any exported node groups")
+
+    root_group_key = data.get('root_group_key')
+    if not isinstance(root_group_key, str) or not root_group_key:
+        raise ValueError("JSON missing root_group_key")
+    if root_group_key not in groups_data:
+        raise ValueError("root_group_key does not reference an exported group")
+
+    stats: Dict[str, int] = {
+        'group_count': 0,
+        'node_count': 0,
+        'link_count': 0,
+        'applied_values': 0,
+        'skipped_values': 0,
+        'skipped_nodes': 0,
+        'skipped_links': 0,
+    }
+    cache: Dict[str, bpy.types.NodeTree] = {}
+    in_progress: Set[str] = set()
+
+    root_tree = _import_node_tree_recursive(
+        root_group_key,
+        groups_data,
+        cache,
+        in_progress,
+        stats,
+    )
+
+    attached_modifier = False
+    modifier_name = ""
+    if attach_to_active_object:
+        if target_object is None:
+            raise ValueError("No active object available to attach imported network")
+        if not hasattr(target_object, "modifiers"):
+            raise ValueError(f"Object '{target_object.name}' does not support modifiers")
+
+        modifier_name = root_tree.name
+        try:
+            modifier = target_object.modifiers.new(name=modifier_name, type='NODES')
+            modifier.node_group = root_tree
+            attached_modifier = True
+        except Exception as exc:
+            raise ValueError(f"Failed to attach imported network to '{target_object.name}': {exc}") from exc
+
+        try:
+            target_object.update_tag(refresh={'DATA', 'OBJECT'})
+        except Exception:
+            pass
+        obj_data = getattr(target_object, "data", None)
+        if obj_data is not None and hasattr(obj_data, "update_tag"):
+            try:
+                obj_data.update_tag()
+            except Exception:
+                pass
+
+    return {
+        'filepath': resolved_path,
+        'root_group_key': root_group_key,
+        'root_group_name': root_tree.name,
+        'group_count': stats['group_count'],
+        'node_count': stats['node_count'],
+        'link_count': stats['link_count'],
+        'applied_values': stats['applied_values'],
+        'skipped_values': stats['skipped_values'],
+        'skipped_nodes': stats['skipped_nodes'],
+        'skipped_links': stats['skipped_links'],
+        'attached_modifier': attached_modifier,
+        'modifier_name': modifier_name,
+    }
+
+
 def _capture_modifier_settings(modifier: bpy.types.Modifier) -> Dict[str, Any]:
     settings: Dict[str, Any] = {}
     properties = modifier.bl_rna.properties

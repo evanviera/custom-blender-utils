@@ -571,6 +571,101 @@ class ExportGeometryNodesNetworkToJSONOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ImportGeometryNodesNetworkFromJSONOperator(bpy.types.Operator):
+    bl_idname = "object.import_geometry_nodes_network_from_json"
+    bl_label = "Import Geometry Nodes Network (JSON)"
+    bl_description = (
+        "Import a Geometry Nodes network JSON export (including nested groups) "
+        "and optionally attach it to the active object"
+    )
+    bl_options = {"INTERNAL", "UNDO"}
+
+    filter_glob: StringProperty(
+        default="*.json",
+        options={'HIDDEN'},
+    )
+
+    filepath: StringProperty(
+        name="Filepath",
+        description="Path to a Geometry Nodes JSON export file",
+        subtype='FILE_PATH',
+        default="",
+    )
+
+    attach_to_active_object: BoolProperty(
+        name="Attach to Active Object",
+        description="Create a Geometry Nodes modifier on the active object using the imported root group",
+        default=True,
+    )
+
+    def invoke(self, context, event):
+        if not self.filepath:
+            blend_path = bpy.data.filepath
+            if blend_path:
+                self.filepath = bpy.path.abspath("//")
+            else:
+                self.filepath = ""
+        context.window_manager.fileselect_add(self)
+        return {'RUNNING_MODAL'}
+
+    def draw(self, context):
+        layout = self.layout
+        layout.prop(self, "attach_to_active_object")
+        if self.attach_to_active_object and context.active_object is None:
+            layout.label(text="No active object; disable attach or pick an active object.")
+
+    def execute(self, context):
+        if not self.filepath.strip():
+            self.report({'WARNING'}, "No import filepath provided")
+            return {'CANCELLED'}
+
+        target_obj = context.active_object if self.attach_to_active_object else None
+        if self.attach_to_active_object and target_obj is None:
+            self.report({'WARNING'}, "No active object available for attaching imported network")
+            return {'CANCELLED'}
+
+        try:
+            stats = fn.import_geometry_nodes_network_from_json(
+                filepath=self.filepath,
+                target_object=target_obj,
+                attach_to_active_object=self.attach_to_active_object,
+            )
+        except ValueError as exc:
+            self.report({'WARNING'}, str(exc))
+            return {'CANCELLED'}
+        except OSError as exc:
+            self.report({'ERROR'}, f"Failed to read JSON file: {exc}")
+            return {'CANCELLED'}
+        except Exception as exc:
+            self.report({'ERROR'}, f"Unexpected import error: {exc}")
+            return {'CANCELLED'}
+
+        try:
+            context.view_layer.update()
+        except Exception:
+            pass
+        try:
+            context.evaluated_depsgraph_get().update()
+        except Exception:
+            pass
+
+        message = (
+            f"Imported '{stats.get('root_group_name', 'network')}' from '{stats.get('filepath', self.filepath)}' "
+            f"with {stats.get('group_count', 0)} group(s), {stats.get('node_count', 0)} node(s), "
+            f"{stats.get('link_count', 0)} link(s)"
+        )
+        if stats.get('attached_modifier', False) and target_obj is not None:
+            message += f"; attached as modifier '{stats.get('modifier_name', '')}' on '{target_obj.name}'"
+        if stats.get('skipped_nodes', 0) or stats.get('skipped_links', 0) or stats.get('skipped_values', 0):
+            message += (
+                f"; skipped nodes={stats.get('skipped_nodes', 0)}, "
+                f"links={stats.get('skipped_links', 0)}, values={stats.get('skipped_values', 0)}"
+            )
+
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 class SetOriginToBottomCenterOperator(bpy.types.Operator):
     bl_idname = "object.set_origin_to_bottom_center"
     bl_label = "Set Origin to Bottom Center"
@@ -1251,6 +1346,7 @@ classes = [
     PasteGeometryNodesModifierAttributesOperator,
     SelectObjectsWithMatchingGeometryNodesOperator,
     ExportGeometryNodesNetworkToJSONOperator,
+    ImportGeometryNodesNetworkFromJSONOperator,
     SetOriginToBottomCenterOperator,
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
