@@ -10,9 +10,25 @@ A curated set of everyday operators for modeling and scene management:
 
 ## Install
 
-1. Download or zip the `Custom-Utilities` folder.
-2. In Blender: Edit → Preferences → Add-ons → Install…
-3. Select the zip/folder, enable “Custom Utilities”.
+This is a Blender extension (4.5+). The addon lives in `custom_blender_utils/`
+with a `blender_manifest.toml`; the folder name must stay a valid Python
+identifier matching the manifest `id`, or Blender skips it.
+
+### Local repository (development)
+
+1. Edit → Preferences → Get Extensions → Repositories (▾) → **+** → Add Local Repository.
+2. Set the directory to the root of this git repo (the folder containing `custom_blender_utils/`).
+3. Enable “Custom Utilities” under Add-ons. Edits to the source load on Blender restart
+   or by disabling/enabling the addon.
+
+### From zip
+
+Drag `custom-blender-utils.zip` into Blender, or Preferences → Add-ons (▾) → Install from Disk.
+Rebuild the zip after changes:
+
+```
+blender --command extension build --source-dir custom_blender_utils --output-filepath custom-blender-utils.zip
+```
 
 ## Usage
 
@@ -31,5 +47,5 @@ A curated set of everyday operators for modeling and scene management:
 
 ## Notes
 
-- Designed for Blender 2.80+.
+- Requires Blender 4.5+.
 - Operators are undoable where applicable.

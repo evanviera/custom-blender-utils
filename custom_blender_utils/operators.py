@@ -821,6 +821,9 @@ class ReloadAllImagesOperator(bpy.types.Operator):
             if image.filepath:
                 try:
                     image.reload()
+                    # reload() alone doesn't re-evaluate the depsgraph, so Geometry Nodes
+                    # that read the image (modifier inputs, Image nodes) keep stale pixels.
+                    image.update_tag()
                     reloaded_count += 1
                 except Exception as e:
                     skipped_count += 1

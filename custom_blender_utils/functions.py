@@ -1239,23 +1239,129 @@ def _modifier_visible_input_labels(modifier: bpy.types.Modifier) -> Dict[str, st
     return labels
 
 
-def _capture_modifier_inputs(modifier: bpy.types.Modifier) -> Tuple[Dict[str, Any], Dict[str, str]]:
+def _modifier_input_container(modifier: bpy.types.Modifier) -> Optional[Any]:
+    """Return the Blender 5.2+ `modifier.properties.inputs` struct, or None on older versions.
+
+    Before 5.2, modifier inputs are IDProperties keyed by socket identifier
+    (`modifier["Socket_1"]`, `modifier["Socket_1_use_attribute"]`, ...).
+    """
+    properties = getattr(modifier, "properties", None)
+    if properties is None:
+        return None
+    return getattr(properties, "inputs", None)
+
+
+def _modifier_input_item(modifier: bpy.types.Modifier, identifier: str) -> Optional[Any]:
+    container = _modifier_input_container(modifier)
+    if container is None:
+        return None
+    item = getattr(container, identifier, None)
+    if item is None or not hasattr(item, "value"):
+        return None
+    return item
+
+
+def _has_modifier_input(modifier: bpy.types.Modifier, identifier: str) -> bool:
+    if _modifier_input_container(modifier) is not None:
+        return _modifier_input_item(modifier, identifier) is not None
+    return identifier in modifier.keys()
+
+
+def _get_modifier_input_value(modifier: bpy.types.Modifier, identifier: str) -> Any:
+    """Return the stored value of a GN modifier input; raises KeyError when missing."""
+    if _modifier_input_container(modifier) is not None:
+        item = _modifier_input_item(modifier, identifier)
+        if item is None:
+            raise KeyError(identifier)
+        return item.value
+    return modifier[identifier]
+
+
+def _set_modifier_input_value(modifier: bpy.types.Modifier, identifier: str, value: Any) -> None:
+    if _modifier_input_container(modifier) is not None:
+        item = _modifier_input_item(modifier, identifier)
+        if item is None:
+            raise KeyError(identifier)
+        item.value = value
+        return
+    modifier[identifier] = value
+
+
+def _get_modifier_input_attribute_state(
+    modifier: bpy.types.Modifier,
+    identifier: str,
+) -> Optional[Dict[str, Any]]:
+    """Return the field source of an input as {'type', 'attribute_name', 'layer_name'}.
+
+    'type' is 'VALUE', 'ATTRIBUTE' or 'LAYER'. Returns None for inputs that can't
+    read attributes.
+    """
+    if _modifier_input_container(modifier) is not None:
+        item = _modifier_input_item(modifier, identifier)
+        if item is None or not hasattr(item, "attribute_name"):
+            return None
+        return {
+            'type': getattr(item, "type", 'VALUE'),
+            'attribute_name': item.attribute_name,
+            'layer_name': getattr(item, "layer_name", ""),
+        }
+
+    use_key = f"{identifier}_use_attribute"
+    if use_key not in modifier.keys():
+        return None
+    return {
+        'type': 'ATTRIBUTE' if modifier[use_key] else 'VALUE',
+        'attribute_name': modifier.get(f"{identifier}_attribute_name", ""),
+        'layer_name': "",
+    }
+
+
+def _set_modifier_input_attribute_state(
+    modifier: bpy.types.Modifier,
+    identifier: str,
+    state: Dict[str, Any],
+) -> bool:
+    source_type = state.get('type', 'VALUE')
+    attribute_name = state.get('attribute_name', "")
+
+    if _modifier_input_container(modifier) is not None:
+        item = _modifier_input_item(modifier, identifier)
+        if item is None or not hasattr(item, "attribute_name"):
+            return False
+        item.attribute_name = attribute_name
+        if hasattr(item, "layer_name"):
+            item.layer_name = state.get('layer_name', "")
+        try:
+            item.type = source_type
+        except TypeError:
+            # Target socket doesn't support this source (e.g. LAYER on a non-boolean input).
+            item.type = 'ATTRIBUTE' if source_type != 'VALUE' else 'VALUE'
+        return True
+
+    use_key = f"{identifier}_use_attribute"
+    if use_key not in modifier.keys():
+        return False
+    modifier[use_key] = source_type != 'VALUE'
+    modifier[f"{identifier}_attribute_name"] = attribute_name
+    return True
+
+
+def _capture_modifier_inputs(
+    modifier: bpy.types.Modifier,
+) -> Tuple[Dict[str, Any], Dict[str, str], Dict[str, Dict[str, Any]]]:
     inputs: Dict[str, Any] = {}
     input_labels: Dict[str, str] = {}
+    input_attributes: Dict[str, Dict[str, Any]] = {}
 
     base_labels = _modifier_visible_input_labels(modifier)
     if not base_labels:
-        return inputs, input_labels
+        return inputs, input_labels, input_attributes
 
-    allowed_keys = set(base_labels.keys())
-
-    for key in modifier.keys():
-        if key == '_RNA_UI':
-            continue
-        if key not in allowed_keys:
+    for key, label in base_labels.items():
+        if not _has_modifier_input(modifier, key):
             continue
         try:
-            value = modifier[key]
+            value = _get_modifier_input_value(modifier, key)
         except Exception:
             continue
 
@@ -1263,10 +1369,13 @@ def _capture_modifier_inputs(modifier: bpy.types.Modifier) -> Tuple[Dict[str, An
         if serialized is _UNSUPPORTED:
             continue
         inputs[key] = serialized
+        input_labels[key] = label
 
-        input_labels[key] = base_labels.get(key, key)
+        attribute_state = _get_modifier_input_attribute_state(modifier, key)
+        if attribute_state is not None:
+            input_attributes[key] = attribute_state
 
-    return inputs, input_labels
+    return inputs, input_labels, input_attributes
 
 
 def copy_geometry_nodes_modifiers(obj: bpy.types.Object) -> Dict[str, int]:
@@ -1297,10 +1406,12 @@ def copy_geometry_nodes_modifiers(obj: bpy.types.Object) -> Dict[str, int]:
             'settings': _capture_modifier_settings(modifier),
             'inputs': {},
             'input_labels': {},
+            'input_attributes': {},
         }
-        entry_inputs, entry_input_labels = _capture_modifier_inputs(modifier)
+        entry_inputs, entry_input_labels, entry_input_attributes = _capture_modifier_inputs(modifier)
         entry['inputs'] = entry_inputs
         entry['input_labels'] = entry_input_labels
+        entry['input_attributes'] = entry_input_attributes
         by_group.setdefault(group_key, []).append(entry)
         entries.append(entry)
         copied_modifiers += 1
@@ -1386,16 +1497,26 @@ def _apply_modifier_settings(
 def _apply_modifier_inputs(
     modifier: bpy.types.Modifier,
     stored_inputs: Dict[str, Any],
+    stored_attributes: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, int]:
     applied = 0
     skipped_missing = 0
     skipped_type = 0
+    stored_attributes = stored_attributes or {}
 
-    current_keys = set(modifier.keys())
     for key, stored_value in stored_inputs.items():
-        if key not in current_keys:
+        if not _has_modifier_input(modifier, key):
             skipped_missing += 1
             continue
+
+        # The field source travels with its input: pasting "Radius" also pastes
+        # whether it reads a named attribute.
+        attribute_state = stored_attributes.get(key)
+        if attribute_state is not None:
+            try:
+                _set_modifier_input_attribute_state(modifier, key, attribute_state)
+            except Exception:
+                pass
 
         value = _deserialize_value(stored_value)
         if value is None and isinstance(stored_value, dict) and stored_value.get('__id_ref__'):
@@ -1403,7 +1524,7 @@ def _apply_modifier_inputs(
             continue
 
         try:
-            modifier[key] = value
+            _set_modifier_input_value(modifier, key, value)
             applied += 1
         except Exception:
             skipped_type += 1
@@ -1506,6 +1627,7 @@ def paste_geometry_nodes_modifiers(
             inputs_stats = _apply_modifier_inputs(
                 match['modifier'],
                 filtered_inputs,
+                stored_entry.get('input_attributes', {}),
             )
 
             applied_values += settings_stats['applied'] + inputs_stats['applied']

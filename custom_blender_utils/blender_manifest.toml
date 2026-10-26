@@ -1,0 +1,27 @@
+schema_version = "1.0.0"
+
+# The directory name must match this id for Blender to load it from a local repository.
+id = "custom_blender_utils"
+version = "0.1.10"
+name = "Custom Utilities"
+tagline = "Everyday operators for modeling and scene management"
+maintainer = "Evan Viera"
+type = "add-on"
+
+tags = ["User Interface", "Object", "Geometry Nodes"]
+
+blender_version_min = "4.5.0"
+
+license = ["SPDX:MIT"]
+copyright = ["2023-2026 Evan Viera"]
+
+[permissions]
+files = "Import/export Geometry Nodes networks as JSON"
+
+[build]
+paths_exclude_pattern = [
+  "__pycache__/",
+  ".*",
+  "*.zip",
+  "symbolic_link.txt",
+]
