@@ -7,6 +7,7 @@ A curated set of everyday operators for modeling and scene management:
 - Set origin to bottom center of bounding box
 - Remove duplicate materials (node-identical remap & cleanup)
 - Move selected objects to any collection (with name filter)
+- Copy the current scene's Render Properties to all other scenes
 
 ## Install
 
@@ -44,6 +45,14 @@ blender --command extension build --source-dir custom_blender_utils --output-fil
 - Copy from selected: Utilities → “Copy Transformations”.
 - Paste to selected: Utilities → “Paste Transformations”.
 - Clear clipboard: Utilities → “Clear Transformations”.
+
+### Copy Render Settings to All Scenes
+Render Properties → button under the render engine (also in the Utilities menu).
+Copies everything in the Render tab — engine, EEVEE/Cycles/Workbench settings,
+light paths, film, motion blur, simplify, performance, bake, Freestyle, Grease
+Pencil and color management — to every other scene. Level Link settings are not
+copied. Enable “Include Output Properties” to also copy resolution, frame rate,
+output path, file format and metadata.
 
 ## Notes
 

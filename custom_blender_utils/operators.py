@@ -836,6 +836,62 @@ class ReloadAllImagesOperator(bpy.types.Operator):
         
         return {'FINISHED'}
 
+class CopyRenderSettingsToAllScenesOperator(bpy.types.Operator):
+    bl_idname = "scene.copy_render_settings_to_all_scenes"
+    bl_label = "Copy Render Settings to All Scenes"
+    bl_description = (
+        "Copy every Render Properties setting of the current scene (engine, sampling, "
+        "light paths, color management, etc.) to all other scenes. Level Link settings are not copied"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    include_output: BoolProperty(
+        name="Include Output Properties",
+        description="Also copy Output tab settings: resolution, frame rate, output path, file format and metadata",
+        default=False,
+    )
+
+    @staticmethod
+    def _target_scenes(context: bpy.types.Context):
+        return [
+            scene for scene in bpy.data.scenes
+            if scene != context.scene and scene.library is None
+        ]
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene is not None and len(bpy.data.scenes) > 1
+
+    def invoke(self, context, event):
+        if not self._target_scenes(context):
+            self.report({'WARNING'}, "No other editable scenes in this file")
+            return {'CANCELLED'}
+        return context.window_manager.invoke_props_dialog(self, width=420)
+
+    def draw(self, context):
+        layout = self.layout
+        targets = self._target_scenes(context)
+        layout.label(text=f"Overwrite render settings in {len(targets)} scene(s) with '{context.scene.name}'?")
+        layout.prop(self, "include_output")
+
+    def execute(self, context):
+        targets = self._target_scenes(context)
+        if not targets:
+            self.report({'WARNING'}, "No other editable scenes in this file")
+            return {'CANCELLED'}
+
+        stats = fn.copy_render_settings_to_scenes(context.scene, targets, include_output=self.include_output)
+        failures = stats['failures']
+        for failure in failures:
+            print(f"Copy Render Settings: could not set {failure}")
+
+        message = f"Copied render settings from '{context.scene.name}' to {stats['updated_scenes']} scene(s)"
+        if failures:
+            self.report({'WARNING'}, f"{message}; {len(failures)} value(s) could not be set (see console)")
+        else:
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
 EDIT_COLLECTION_NAME_KEY = "custom_utils_edit_collection_name"
 EDIT_COLLECTION_LINKED_KEY = "custom_utils_edit_collection_linked_by_operator"
 EDIT_COLLECTION_AREA_POINTER_KEY = "custom_utils_edit_collection_area_ptr"
@@ -1354,6 +1410,7 @@ classes = [
     RemoveDuplicateMaterialsOperator,
     MoveSelectedToCollectionOperator,
     ReloadAllImagesOperator,
+    CopyRenderSettingsToAllScenesOperator,
     EditInstancedCollectionOperator,
 ]
 

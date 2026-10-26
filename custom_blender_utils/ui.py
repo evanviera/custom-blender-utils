@@ -18,6 +18,7 @@ PIE_OPERATOR_SPECS = [
     ("pie_show_move_selected_to_collection", "object.move_selected_to_collection", "Move to Collection", True),
     ("pie_show_clear_transformations_clipboard", "object.clear_transformations_clipboard", "Clear Transformations", False),
     ("pie_show_reload_all_images", "image.reload_all_images", "Reload All Images", False),
+    ("pie_show_copy_render_settings_to_all_scenes", "scene.copy_render_settings_to_all_scenes", "Copy Render Settings to All Scenes", False),
     ("pie_show_edit_instanced_collection", "collection.edit_instanced_collection", "Edit Collection", False),
 ]
 
@@ -56,6 +57,7 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
     pie_show_move_selected_to_collection: BoolProperty(name="Move to Collection", default=True)
     pie_show_clear_transformations_clipboard: BoolProperty(name="Clear Transformations", default=False)
     pie_show_reload_all_images: BoolProperty(name="Reload All Images", default=False)
+    pie_show_copy_render_settings_to_all_scenes: BoolProperty(name="Copy Render Settings to All Scenes", default=False)
     pie_show_edit_instanced_collection: BoolProperty(name="Edit Collection", default=False)
 
     def draw(self, context):
@@ -85,6 +87,7 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.set_origin_to_bottom_center", text="Set Origin to Bottom")
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         layout.operator("image.reload_all_images", text="Reload All Images")
+        layout.operator("scene.copy_render_settings_to_all_scenes", text="Copy Render Settings to All Scenes")
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection")
 
@@ -126,6 +129,10 @@ def draw_func(self, context):
     layout = self.layout
     layout.menu("VIEW3D_MT_custom_menu")
 
+# Adds the copy button to the top of the Render Properties tab
+def draw_render_properties_func(self, context):
+    self.layout.operator("scene.copy_render_settings_to_all_scenes", icon='SCENE_DATA')
+
 # Keymap for pie menu
 addon_keymaps = []
 
@@ -140,6 +147,11 @@ def register():
     except Exception:
         pass
     bpy.types.VIEW3D_MT_editor_menus.append(draw_func)
+    try:
+        bpy.types.RENDER_PT_context.remove(draw_render_properties_func)
+    except Exception:
+        pass
+    bpy.types.RENDER_PT_context.append(draw_render_properties_func)
 
     # Register the pie menu keymap
     wm = bpy.context.window_manager
@@ -171,6 +183,10 @@ def unregister():
     bpy.utils.unregister_class(CustomUtilitiesPreferences)
     try:
         bpy.types.VIEW3D_MT_editor_menus.remove(draw_func)
+    except Exception:
+        pass
+    try:
+        bpy.types.RENDER_PT_context.remove(draw_render_properties_func)
     except Exception:
         pass
     

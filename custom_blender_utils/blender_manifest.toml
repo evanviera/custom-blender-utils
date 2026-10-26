@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 # The directory name must match this id for Blender to load it from a local repository.
 id = "custom_blender_utils"
-version = "0.1.10"
+version = "0.1.11"
 name = "Custom Utilities"
 tagline = "Everyday operators for modeling and scene management"
 maintainer = "Evan Viera"

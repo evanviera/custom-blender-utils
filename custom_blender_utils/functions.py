@@ -9,7 +9,7 @@ operations, and origin adjustments.
 import json
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 from mathutils import Vector, Color, Euler, Quaternion
 from bpy_extras import view3d_utils
 
@@ -1685,3 +1685,245 @@ def set_origin_to_bottom_center(obj: bpy.types.Object) -> None:
     bpy.context.scene.cursor.location = world_origin
     bpy.ops.object.origin_set(type='ORIGIN_CURSOR')
     bpy.context.scene.cursor.location = prev_cursor_loc
+
+
+# Scene-level structs drawn by Blender's own Render Properties panels. Display settings
+# come before view settings because valid view transforms depend on the display device.
+_RENDER_TAB_SCENE_STRUCTS = (
+    "render",
+    "eevee",
+    "display",
+    "display_settings",
+    "view_settings",
+    "sequencer_colorspace_settings",
+    "grease_pencil_settings",
+    "hydra",
+)
+
+# RenderSettings properties drawn in the Output Properties tab rather than Render.
+_OUTPUT_TAB_RENDER_PROPS = {
+    "resolution_x", "resolution_y", "resolution_percentage",
+    "pixel_aspect_x", "pixel_aspect_y", "ppm_base", "ppm_factor",
+    "use_border", "use_crop_to_border",
+    "border_min_x", "border_min_y", "border_max_x", "border_max_y",
+    "fps", "fps_base", "frame_map_old", "frame_map_new",
+    "use_compositing", "use_sequencer", "dither_intensity",
+    "metadata_input",
+    "filepath", "save_output", "use_file_extension", "use_overwrite",
+    "use_placeholder", "use_render_cache",
+    "image_settings", "ffmpeg",
+    "use_multiview", "views_format", "views",
+}
+_OUTPUT_TAB_RENDER_PREFIXES = ("use_stamp", "stamp_")
+
+# Add-ons whose Render Properties panels are left alone when copying render settings.
+_RENDER_COPY_EXCLUDED_ADDONS = {"level_link"}
+
+_RENDER_COPY_MAX_DEPTH = 8
+
+
+def _addon_package_root(module_name: str) -> str:
+    parts = module_name.split(".")
+    if parts[0] == "bl_ext" and len(parts) >= 3:
+        return ".".join(parts[:3])
+    return parts[0]
+
+
+def _render_tab_addon_scene_props(scene: bpy.types.Scene) -> List[str]:
+    """Return Scene PropertyGroup pointers owned by add-ons that draw Render Properties panels.
+
+    This picks up render engines such as Cycles (`scene.cycles`, `scene.cycles_curves`)
+    without listing them by hand, and skips add-ons in `_RENDER_COPY_EXCLUDED_ADDONS`.
+    """
+    def all_subclasses(cls):
+        for sub in cls.__subclasses__():
+            yield sub
+            yield from all_subclasses(sub)
+
+    render_tab_packages: Set[str] = set()
+    for panel in all_subclasses(bpy.types.Panel):
+        if getattr(panel, "bl_space_type", "") != 'PROPERTIES' or getattr(panel, "bl_context", "") != "render":
+            continue
+        root = _addon_package_root(panel.__module__)
+        if root.startswith("bl_") and not root.startswith("bl_ext."):
+            continue  # Built-in UI, covered by _RENDER_TAB_SCENE_STRUCTS.
+        if root.rsplit(".", 1)[-1] in _RENDER_COPY_EXCLUDED_ADDONS:
+            continue
+        render_tab_packages.add(root)
+
+    prop_names: List[str] = []
+    for prop in scene.bl_rna.properties:
+        if prop.type != 'POINTER' or not prop.is_runtime:
+            continue
+        group = getattr(scene, prop.identifier, None)
+        module_name = type(group).__module__ if group is not None else ""
+        if module_name and _addon_package_root(module_name) in render_tab_packages:
+            prop_names.append(prop.identifier)
+    return prop_names
+
+
+def _copy_curve_mapping(src: bpy.types.CurveMapping, dst: bpy.types.CurveMapping) -> None:
+    for src_curve, dst_curve in zip(src.curves, dst.curves):
+        dst_points = dst_curve.points
+        while len(dst_points) < len(src_curve.points):
+            dst_points.new(0.0, 0.0)
+        while len(dst_points) > len(src_curve.points):
+            dst_points.remove(dst_points[-1])
+        for src_point, dst_point in zip(src_curve.points, dst_points):
+            dst_point.location = src_point.location
+            dst_point.handle_type = src_point.handle_type
+            dst_point.select = src_point.select
+    dst.update()
+
+
+def _copy_rna_struct(
+    src: Any,
+    dst: Any,
+    path: str,
+    failures: List[str],
+    skip: Optional[Callable[[str], bool]] = None,
+    depth: int = 0,
+) -> int:
+    """Copy every writable RNA property from `src` to `dst`, recursing into nested structs.
+
+    ID datablock references are assigned, never recursed into. Returns the number of
+    values written; paths that couldn't be written are appended to `failures`.
+    """
+    if depth > _RENDER_COPY_MAX_DEPTH:
+        return 0
+
+    copied = 0
+    for prop in src.bl_rna.properties:
+        prop_id = prop.identifier
+        if prop_id == "rna_type" or (skip is not None and skip(prop_id)):
+            continue
+        prop_path = f"{path}.{prop_id}"
+
+        try:
+            src_value = getattr(src, prop_id)
+        except Exception:
+            continue
+
+        if prop.type == 'POINTER':
+            if isinstance(src_value, bpy.types.ID) or (src_value is None and not prop.is_readonly):
+                if prop.is_readonly:
+                    continue
+                try:
+                    setattr(dst, prop_id, src_value)
+                    copied += 1
+                except Exception:
+                    failures.append(prop_path)
+                continue
+            dst_value = getattr(dst, prop_id, None)
+            if src_value is None or dst_value is None:
+                continue
+            if isinstance(src_value, bpy.types.CurveMapping):
+                copied += _copy_rna_struct(
+                    src_value, dst_value, prop_path, failures,
+                    skip=lambda name: name == "curves", depth=depth + 1,
+                )
+                try:
+                    _copy_curve_mapping(src_value, dst_value)
+                except Exception:
+                    failures.append(f"{prop_path}.curves")
+                continue
+            copied += _copy_rna_struct(src_value, dst_value, prop_path, failures, depth=depth + 1)
+            continue
+
+        if prop.type == 'COLLECTION':
+            dst_value = getattr(dst, prop_id, None)
+            if dst_value is None or len(src_value) != len(dst_value):
+                if len(src_value) or (dst_value is not None and len(dst_value)):
+                    failures.append(prop_path)
+                continue
+            for index, (src_item, dst_item) in enumerate(zip(src_value, dst_value)):
+                copied += _copy_rna_struct(
+                    src_item, dst_item, f"{prop_path}[{index}]", failures, depth=depth + 1,
+                )
+            continue
+
+        if prop.is_readonly:
+            continue
+        if prop.type == 'ENUM' and src_value == "":
+            continue  # Unset in the source (no valid item), nothing to copy.
+        try:
+            dst_value = getattr(dst, prop_id)
+            if getattr(prop, "is_array", False):
+                unchanged = tuple(dst_value) == tuple(src_value)
+            else:
+                unchanged = dst_value == src_value
+        except Exception:
+            unchanged = False
+        if unchanged:
+            continue  # Avoid firing update callbacks for values that already match.
+        try:
+            setattr(dst, prop_id, src_value)
+            copied += 1
+        except Exception:
+            failures.append(prop_path)
+
+    return copied
+
+
+def copy_render_settings_to_scenes(
+    source: bpy.types.Scene,
+    targets: List[bpy.types.Scene],
+    include_output: bool = False,
+) -> Dict[str, Any]:
+    """Copy the Render Properties tab of `source` onto each scene in `targets`.
+
+    Covers the render engine and everything Blender and render-engine add-ons draw in
+    the Render tab (EEVEE, Cycles, Workbench, Grease Pencil, Hydra, Freestyle, motion
+    blur, simplify, performance, bake, color management). Add-ons in
+    `_RENDER_COPY_EXCLUDED_ADDONS` (Level Link) are skipped. With `include_output`,
+    the Output tab settings stored on `scene.render` (resolution, frame rate, output
+    path, file format, metadata, stereoscopy) are copied too.
+    """
+    def skip_render_prop(prop_id: str) -> bool:
+        if include_output:
+            return False
+        return prop_id in _OUTPUT_TAB_RENDER_PROPS or prop_id.startswith(_OUTPUT_TAB_RENDER_PREFIXES)
+
+    struct_names = [name for name in _RENDER_TAB_SCENE_STRUCTS if getattr(source, name, None) is not None]
+    struct_names += _render_tab_addon_scene_props(source)
+
+    copied_values = 0
+    failures: List[str] = []
+    updated_scenes = 0
+    for target in targets:
+        if target == source or target.library is not None:
+            continue
+
+        # Some values are only valid once others are set (engine-specific enums, view
+        # transforms that depend on the display device), so copy twice and only report
+        # what still fails on the second pass.
+        for attempt in range(2):
+            pass_failures: List[str] = []
+            pass_copied = 0
+            try:
+                target.render.engine = source.render.engine
+            except Exception:
+                pass_failures.append("render.engine")
+            for name in struct_names:
+                src_struct = getattr(source, name, None)
+                dst_struct = getattr(target, name, None)
+                if src_struct is None or dst_struct is None:
+                    continue
+                pass_copied += _copy_rna_struct(
+                    src_struct,
+                    dst_struct,
+                    name,
+                    pass_failures,
+                    skip=skip_render_prop if name == "render" else None,
+                )
+
+        copied_values += pass_copied
+        failures.extend(f"{target.name}: {path}" for path in pass_failures)
+        updated_scenes += 1
+
+    return {
+        'updated_scenes': updated_scenes,
+        'copied_values': copied_values,
+        'failures': failures,
+        'structs': struct_names,
+    }
