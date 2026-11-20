@@ -1390,6 +1390,176 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
 
         return {'FINISHED'}
 
+
+def _collection_instance_poll(context: bpy.types.Context, minimum: int = 1) -> bool:
+    if context.mode != 'OBJECT':
+        return False
+    return len(fn.get_selected_collection_instances(context)) >= minimum
+
+
+class DecomposeCollectionOperator(bpy.types.Operator):
+    bl_idname = "object.decompose_collection_instance"
+    bl_label = "Decompose Collection"
+    bl_description = (
+        "Replace the selected collection instances with editable copies of their contents, "
+        "exactly where they were. The source collection is not changed"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    recursive: BoolProperty(
+        name="Nested Instances",
+        description="Also decompose collection instances nested inside the collection",
+        default=True,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _collection_instance_poll(context)
+
+    def execute(self, context):
+        instancers = fn.get_selected_collection_instances(context)
+        if not instancers:
+            self.report({'WARNING'}, "Select at least one collection instance")
+            return {'CANCELLED'}
+
+        for obj in context.selected_objects:
+            obj.select_set(False)
+
+        created = []
+        approximate = 0
+        for instancer in instancers:
+            objs, approx = fn.decompose_collection_instance(instancer, recursive=self.recursive)
+            created.extend(objs)
+            approximate += approx
+
+        for obj in created:
+            try:
+                obj.select_set(True)
+            except RuntimeError:
+                pass  # not in this view layer
+        selectable = [obj for obj in created if obj.select_get()]
+        if selectable:
+            context.view_layer.objects.active = selectable[0]
+
+        message = f"Decomposed {len(instancers)} instance(s) into {len(created)} object(s)"
+        if approximate:
+            self.report({'WARNING'}, f"{message}; {approximate} sheared object(s) without mesh data were approximated")
+        else:
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
+class MergeCollectionsOperator(bpy.types.Operator):
+    bl_idname = "object.merge_collection_instances"
+    bl_label = "Merge Collections"
+    bl_description = (
+        "Merge the collections of the selected instances into one new collection, instanced by "
+        "the active instance. Nothing moves visually; source collections are not changed"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    new_name: StringProperty(
+        name="Name",
+        description="Name of the merged collection",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _collection_instance_poll(context, minimum=2)
+
+    def invoke(self, context, event):
+        instancers = fn.get_selected_collection_instances(context)
+        if len(instancers) < 2:
+            self.report({'WARNING'}, "Select at least two collection instances")
+            return {'CANCELLED'}
+        base = instancers[0].instance_collection.name
+        self.new_name = fn.unique_collection_name(f"{base}_merged")
+        return context.window_manager.invoke_props_dialog(self, width=320)
+
+    def draw(self, context):
+        self.layout.prop(self, "new_name")
+
+    def execute(self, context):
+        instancers = fn.get_selected_collection_instances(context)
+        if len(instancers) < 2:
+            self.report({'WARNING'}, "Select at least two collection instances")
+            return {'CANCELLED'}
+
+        keeper = instancers[0]
+        sources = len(instancers)
+        merged, approximate = fn.merge_collection_instances(instancers, self.new_name.strip())
+        if merged is None:
+            self.report({'ERROR'}, "Nothing to merge")
+            return {'CANCELLED'}
+
+        for obj in context.selected_objects:
+            obj.select_set(False)
+        keeper.select_set(True)
+        context.view_layer.objects.active = keeper
+
+        message = f"Merged {sources} instances into collection '{merged.name}'"
+        if approximate:
+            self.report({'WARNING'}, f"{message}; {approximate} sheared object(s) without mesh data were approximated")
+        else:
+            self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
+class DuplicateCollectionOperator(bpy.types.Operator):
+    bl_idname = "object.duplicate_instanced_collection"
+    bl_label = "Duplicate Collection"
+    bl_description = (
+        "Make an independent copy of the active instance's collection (objects and data) and "
+        "switch the selected instances of it to the copy, e.g. to create a variation"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    new_name: StringProperty(
+        name="Name",
+        description="Name of the new collection",
+        default="",
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _collection_instance_poll(context)
+
+    def invoke(self, context, event):
+        instancers = fn.get_selected_collection_instances(context)
+        if not instancers:
+            self.report({'WARNING'}, "Select a collection instance")
+            return {'CANCELLED'}
+        self.new_name = fn.unique_collection_name(instancers[0].instance_collection.name)
+        return context.window_manager.invoke_props_dialog(self, width=320)
+
+    def draw(self, context):
+        layout = self.layout
+        instancers = fn.get_selected_collection_instances(context)
+        if instancers:
+            layout.label(text=f"Source: {instancers[0].instance_collection.name}", icon='OUTLINER_COLLECTION')
+        layout.prop(self, "new_name")
+
+    def execute(self, context):
+        instancers = fn.get_selected_collection_instances(context)
+        if not instancers:
+            self.report({'WARNING'}, "Select a collection instance")
+            return {'CANCELLED'}
+
+        source = instancers[0].instance_collection
+        switched = sum(1 for obj in instancers if obj.instance_collection == source)
+        new_coll = fn.duplicate_instanced_collection(instancers, self.new_name.strip())
+        if new_coll is None:
+            self.report({'ERROR'}, "Could not duplicate collection")
+            return {'CANCELLED'}
+
+        self.report(
+            {'INFO'},
+            f"Duplicated '{source.name}' as '{new_coll.name}' and switched {switched} instance(s)",
+        )
+        return {'FINISHED'}
+
+
 classes = [
     CUSTOMUTILS_PG_gn_network_selection_item,
     CUSTOMUTILS_PG_gn_parameter_selection_item,
@@ -1412,6 +1582,9 @@ classes = [
     ReloadAllImagesOperator,
     CopyRenderSettingsToAllScenesOperator,
     EditInstancedCollectionOperator,
+    DecomposeCollectionOperator,
+    MergeCollectionsOperator,
+    DuplicateCollectionOperator,
 ]
 
 def register():

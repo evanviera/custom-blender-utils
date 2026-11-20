@@ -10,7 +10,7 @@ import json
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
-from mathutils import Vector, Color, Euler, Quaternion
+from mathutils import Matrix, Vector, Color, Euler, Quaternion
 from bpy_extras import view3d_utils
 
 def measure_distance_from_camera_to_location(location: Vector) -> Optional[float]:
@@ -1927,3 +1927,526 @@ def copy_render_settings_to_scenes(
         'failures': failures,
         'structs': struct_names,
     }
+
+
+# ---------------------------------------------------------------------------
+# Collection utilities (instances, deep copies, decompose, merge, duplicate)
+# ---------------------------------------------------------------------------
+
+def get_instanced_collection(obj: Optional[bpy.types.Object]) -> Optional[bpy.types.Collection]:
+    """Return the collection an object instances, or None."""
+    if obj is None:
+        return None
+    if getattr(obj, "instance_type", None) == 'COLLECTION' and getattr(obj, "instance_collection", None):
+        return obj.instance_collection
+    return None
+
+
+def get_selected_collection_instances(context: bpy.types.Context) -> List[bpy.types.Object]:
+    """Selected collection-instance objects, with the active object first when it is one."""
+    instances = [obj for obj in context.selected_objects if get_instanced_collection(obj) is not None]
+    active = context.active_object
+    if active is not None and active in instances:
+        instances.remove(active)
+        instances.insert(0, active)
+    return instances
+
+
+def _collection_tree(root: bpy.types.Collection) -> List[bpy.types.Collection]:
+    """Return root and all nested child collections, each once, parents before children."""
+    ordered: List[bpy.types.Collection] = []
+    seen: Set[int] = set()
+    stack = [root]
+    while stack:
+        coll = stack.pop(0)
+        if coll.as_pointer() in seen:
+            continue
+        seen.add(coll.as_pointer())
+        ordered.append(coll)
+        stack.extend(coll.children)
+    return ordered
+
+
+def _collection_tree_objects(root: bpy.types.Collection) -> List[bpy.types.Object]:
+    """All objects in a collection tree, each once."""
+    objects: List[bpy.types.Object] = []
+    seen: Set[int] = set()
+    for coll in _collection_tree(root):
+        for obj in coll.objects:
+            if obj.as_pointer() not in seen:
+                seen.add(obj.as_pointer())
+                objects.append(obj)
+    return objects
+
+
+def _collection_tree_visibility(root: bpy.types.Collection) -> Tuple[Set[int], Set[int]]:
+    """Return pointers of objects reachable through viewport-visible / render-visible collections.
+
+    Mirrors how a collection instance draws: an object hidden by one of its
+    collections inside the tree is only shown if another path reaches it.
+    """
+    visible_viewport: Set[int] = set()
+    visible_render: Set[int] = set()
+
+    def _walk(coll: bpy.types.Collection, hidden_vp: bool, hidden_render: bool, depth: int) -> None:
+        if depth > 64:
+            return
+        hidden_vp = hidden_vp or coll.hide_viewport
+        hidden_render = hidden_render or coll.hide_render
+        for obj in coll.objects:
+            if not hidden_vp:
+                visible_viewport.add(obj.as_pointer())
+            if not hidden_render:
+                visible_render.add(obj.as_pointer())
+        for child in coll.children:
+            _walk(child, hidden_vp, hidden_render, depth + 1)
+
+    _walk(root, False, False, 0)
+    return visible_viewport, visible_render
+
+
+def _remap_pointer_props(struct: Any, id_map: Dict[int, bpy.types.ID]) -> None:
+    """Point any writable ID pointer on `struct` at its copy when the target was copied."""
+    if struct is None:
+        return
+    for prop in struct.bl_rna.properties:
+        if prop.type != 'POINTER' or prop.is_readonly or prop.identifier == "rna_type":
+            continue
+        try:
+            value = getattr(struct, prop.identifier)
+        except AttributeError:
+            continue
+        if isinstance(value, bpy.types.ID):
+            replacement = id_map.get(value.as_pointer())
+            if replacement is not None:
+                try:
+                    setattr(struct, prop.identifier, replacement)
+                except (AttributeError, TypeError, ValueError, RuntimeError):
+                    pass
+
+
+def _remap_modifier_inputs(modifier: bpy.types.Modifier, id_map: Dict[int, bpy.types.ID]) -> None:
+    """Remap object/collection inputs of a Geometry Nodes modifier (IDProperties or 5.2+ inputs)."""
+    container = _modifier_input_container(modifier)
+    if container is not None:
+        for prop in container.bl_rna.properties:
+            item = getattr(container, prop.identifier, None)
+            value = getattr(item, "value", None) if item is not None else None
+            if isinstance(value, bpy.types.ID):
+                replacement = id_map.get(value.as_pointer())
+                if replacement is not None:
+                    try:
+                        item.value = replacement
+                    except (AttributeError, TypeError, ValueError, RuntimeError):
+                        pass
+        return
+    for key in list(modifier.keys()):
+        value = modifier[key]
+        if isinstance(value, bpy.types.ID):
+            replacement = id_map.get(value.as_pointer())
+            if replacement is not None:
+                modifier[key] = replacement
+
+
+def _remap_animation_drivers(id_block: bpy.types.ID, id_map: Dict[int, bpy.types.ID]) -> None:
+    anim = getattr(id_block, "animation_data", None)
+    if anim is None:
+        return
+    for fcurve in anim.drivers:
+        for variable in fcurve.driver.variables:
+            for target in variable.targets:
+                if target.id is not None:
+                    replacement = id_map.get(target.id.as_pointer())
+                    if replacement is not None:
+                        target.id = replacement
+
+
+def _remap_object_references(obj: bpy.types.Object, id_map: Dict[int, bpy.types.ID]) -> None:
+    """Repoint an object's internal references (parent, modifiers, constraints, drivers, data)."""
+    # Assigning `parent` through RNA resets the parent inverse; keep the original one.
+    parent_inverse = obj.matrix_parent_inverse.copy()
+    _remap_pointer_props(obj, id_map)
+    obj.matrix_parent_inverse = parent_inverse
+    for modifier in obj.modifiers:
+        _remap_pointer_props(modifier, id_map)
+        if modifier.type == 'NODES':
+            _remap_modifier_inputs(modifier, id_map)
+    for constraint in obj.constraints:
+        _remap_pointer_props(constraint, id_map)
+        for target in getattr(constraint, "targets", ()):
+            _remap_pointer_props(target, id_map)
+    _remap_animation_drivers(obj, id_map)
+    if obj.data is not None:
+        _remap_pointer_props(obj.data, id_map)
+        _remap_animation_drivers(obj.data, id_map)
+
+
+def _copy_objects(
+    objects: List[bpy.types.Object],
+    id_map: Dict[int, bpy.types.ID],
+) -> List[Tuple[bpy.types.Object, bpy.types.Object]]:
+    """Copy objects with their own object data (materials stay shared).
+
+    Objects that shared data in the source keep sharing one copy. Internal
+    references are remapped through `id_map`, which is updated in place.
+    Returns (source, copy) pairs; copies are not linked to any collection.
+    """
+    pairs: List[Tuple[bpy.types.Object, bpy.types.Object]] = []
+    for src in objects:
+        dst = src.copy()
+        if src.data is not None:
+            data_copy = id_map.get(src.data.as_pointer())
+            if data_copy is None:
+                data_copy = src.data.copy()
+                id_map[src.data.as_pointer()] = data_copy
+            dst.data = data_copy
+        id_map[src.as_pointer()] = dst
+        pairs.append((src, dst))
+    for _src, dst in pairs:
+        _remap_object_references(dst, id_map)
+    return pairs
+
+
+def _copy_collection_shell(src: bpy.types.Collection, name: Optional[str] = None) -> bpy.types.Collection:
+    """Copy a collection's settings (offset, flags, color, custom props) without its contents."""
+    dst = src.copy()
+    for obj in list(dst.objects):
+        dst.objects.unlink(obj)
+    for child in list(dst.children):
+        dst.children.unlink(child)
+    if name:
+        dst.name = name
+    return dst
+
+
+def deep_copy_collection(
+    src: bpy.types.Collection,
+    name: Optional[str] = None,
+) -> Tuple[bpy.types.Collection, Dict[int, bpy.types.ID], List[Tuple[bpy.types.Object, bpy.types.Object]]]:
+    """Fully duplicate a collection tree: child collections, objects and object data.
+
+    The copy is independent of the source (editing it never changes the
+    original) and is not linked into any scene. Returns (root copy, id_map,
+    object pairs).
+    """
+    id_map: Dict[int, bpy.types.ID] = {}
+    tree = _collection_tree(src)
+    for coll in tree:
+        id_map[coll.as_pointer()] = _copy_collection_shell(coll, name if coll == src else None)
+
+    pairs = _copy_objects(_collection_tree_objects(src), id_map)
+
+    for coll in tree:
+        dst_coll = id_map[coll.as_pointer()]
+        for obj in coll.objects:
+            dst_coll.objects.link(id_map[obj.as_pointer()])
+        for child in coll.children:
+            dst_coll.children.link(id_map[child.as_pointer()])
+        _remap_pointer_props(dst_coll, id_map)
+    return id_map[src.as_pointer()], id_map, pairs
+
+
+def get_collection_parents(coll: bpy.types.Collection) -> List[bpy.types.Collection]:
+    """Collections (including scene master collections) that have `coll` as a direct child."""
+    parents: List[bpy.types.Collection] = []
+    for scene in bpy.data.scenes:
+        if any(child == coll for child in scene.collection.children):
+            parents.append(scene.collection)
+    for candidate in bpy.data.collections:
+        if any(child == coll for child in candidate.children):
+            parents.append(candidate)
+    return parents
+
+
+def _find_layer_collection(layer_coll: bpy.types.LayerCollection, coll: bpy.types.Collection):
+    if layer_coll.collection == coll:
+        return layer_coll
+    for child in layer_coll.children:
+        found = _find_layer_collection(child, coll)
+        if found is not None:
+            return found
+    return None
+
+
+def _copy_layer_collection_state(src: bpy.types.Collection, dst: bpy.types.Collection) -> None:
+    """Match exclude/hide/holdout/indirect-only of `dst` to `src` in every view layer."""
+    for scene in bpy.data.scenes:
+        for view_layer in scene.view_layers:
+            src_layer = _find_layer_collection(view_layer.layer_collection, src)
+            dst_layer = _find_layer_collection(view_layer.layer_collection, dst)
+            if src_layer is None or dst_layer is None:
+                continue
+            for attr in ("exclude", "hide_viewport", "holdout", "indirect_only"):
+                try:
+                    setattr(dst_layer, attr, getattr(src_layer, attr))
+                except (AttributeError, TypeError, RuntimeError):
+                    pass
+
+
+def link_collection_like(src: bpy.types.Collection, dst: bpy.types.Collection) -> int:
+    """Link `dst` under the same parents as `src` and mirror its view-layer state."""
+    parents = get_collection_parents(src)
+    for parent in parents:
+        if not any(child == dst for child in parent.children):
+            parent.children.link(dst)
+    _copy_layer_collection_state(src, dst)
+    return len(parents)
+
+
+def unique_collection_name(base: str) -> str:
+    """Return `base` if unused, else the first free `base.001`-style name."""
+    if base not in bpy.data.collections:
+        return base
+    index = 1
+    while f"{base}.{index:03d}" in bpy.data.collections:
+        index += 1
+    return f"{base}.{index:03d}"
+
+
+def _detach_children_keep_transform(
+    obj: bpy.types.Object,
+    new_parent: Optional[bpy.types.Object] = None,
+) -> None:
+    """Move obj's children to `new_parent` (or no parent) without moving them visually."""
+    parent_world = new_parent.matrix_world.copy() if new_parent is not None else None
+    for child in list(obj.children):
+        _set_world_transform(child, child.matrix_world.copy(), new_parent, parent_world)
+
+
+def _is_identity(matrix: Matrix, tolerance: float = 1e-5) -> bool:
+    identity = Matrix.Identity(4)
+    return all(abs(matrix[r][c] - identity[r][c]) <= tolerance for r in range(4) for c in range(4))
+
+
+def _set_world_transform(
+    obj: bpy.types.Object,
+    world: Matrix,
+    parent: Optional[bpy.types.Object],
+    parent_world: Optional[Matrix],
+    children: Optional[List[bpy.types.Object]] = None,
+    allow_bake: bool = False,
+) -> bool:
+    """Parent `obj` and place it at exactly `world`, without relying on matrix_world.
+
+    `parent_world` must be the parent's true world matrix; fresh copies still
+    carry their source's matrix_world until the next depsgraph update.
+
+    Loc/rot/scale cannot hold shear (non-uniform scale over rotation). Any
+    shear left over goes into the parent inverse when there is a parent, or is
+    baked into the object's own data when `allow_bake` is set (with `children`
+    compensated). Returns False only when the placement had to be approximated.
+    """
+    obj.parent = parent
+    obj.matrix_parent_inverse.identity()
+    has_parent = parent is not None and parent_world is not None
+    local = parent_world.inverted_safe() @ world if has_parent else world.copy()
+
+    loc, rot, scale = local.decompose()
+    basis = Matrix.LocRotScale(loc, rot, scale)
+    obj.matrix_basis = basis
+    residual = basis.inverted_safe() @ local
+    if _is_identity(residual):
+        return True
+
+    if has_parent:
+        # world = parent_world @ parent_inverse @ basis
+        obj.matrix_parent_inverse = local @ basis.inverted_safe()
+        return True
+
+    data = obj.data
+    if allow_bake and data is not None and data.users == 1 and hasattr(data, "transform"):
+        data.transform(residual)
+        for child in children or ():
+            child.matrix_parent_inverse = residual @ child.matrix_parent_inverse
+        return True
+    return False
+
+
+def _place_root_copies(
+    pairs: List[Tuple[bpy.types.Object, bpy.types.Object]],
+    id_map: Dict[int, bpy.types.ID],
+    transform: Matrix,
+    new_parent: Optional[bpy.types.Object] = None,
+    new_parent_world: Optional[Matrix] = None,
+) -> int:
+    """Move copies whose parent was not copied so they sit at `transform @ source world`.
+
+    Children of copied objects keep their local transforms and follow their
+    (copied) parents automatically. Returns how many placements were approximate.
+    """
+    approximate = 0
+    for src, dst in pairs:
+        parent = src.parent
+        if parent is not None and parent.as_pointer() in id_map:
+            continue
+        children = [child for _s, child in pairs if child.parent == dst]
+        if not _set_world_transform(
+            dst, transform @ src.matrix_world, new_parent, new_parent_world, children, allow_bake=True
+        ):
+            approximate += 1
+    return approximate
+
+
+def _instance_space(instancer: bpy.types.Object) -> Matrix:
+    """World matrix applied to an instanced collection's contents."""
+    coll = instancer.instance_collection
+    return instancer.matrix_world @ Matrix.Translation(-Vector(coll.instance_offset))
+
+
+def _decompose_into(
+    coll: bpy.types.Collection,
+    transform: Matrix,
+    target_collections: List[bpy.types.Collection],
+    new_parent: Optional[bpy.types.Object],
+    new_parent_world: Optional[Matrix],
+    recursive: bool,
+    depth: int,
+) -> Tuple[List[bpy.types.Object], int]:
+    """Copy `coll`'s contents into `target_collections`, placed by `transform`.
+
+    Root copies are parented to `new_parent` (whose true world matrix is
+    `new_parent_world`). Returns (every object created, nested ones included;
+    number of placements that had to be approximated).
+    """
+    objects = _collection_tree_objects(coll)
+    visible_vp, visible_render = _collection_tree_visibility(coll)
+    copied_ptrs = {obj.as_pointer() for obj in objects}
+
+    # Nested instances are expanded in place of the instancer when recursing; the
+    # instancer is only kept (as a plain empty) when other copied objects hang off it.
+    nested: List[bpy.types.Object] = []
+    if recursive and depth < 32:
+        nested = [obj for obj in objects if get_instanced_collection(obj) is not None]
+    drop = {
+        obj.as_pointer()
+        for obj in nested
+        if not any(child.as_pointer() in copied_ptrs for child in obj.children)
+    }
+
+    id_map: Dict[int, bpy.types.ID] = {}
+    pairs = _copy_objects([obj for obj in objects if obj.as_pointer() not in drop], id_map)
+    approximate = _place_root_copies(pairs, id_map, transform, new_parent, new_parent_world)
+
+    created: List[bpy.types.Object] = []
+    for src, dst in pairs:
+        for target in target_collections:
+            target.objects.link(dst)
+        dst.hide_viewport = src.hide_viewport or src.as_pointer() not in visible_vp
+        dst.hide_render = src.hide_render or src.as_pointer() not in visible_render
+        if recursive and src in nested:
+            dst.instance_type = 'NONE'
+            dst.instance_collection = None
+        created.append(dst)
+
+    for src in nested:
+        kept = id_map.get(src.as_pointer())
+        if kept is not None:
+            # The kept empty sits exactly at transform @ source world.
+            nested_parent, nested_parent_world = kept, transform @ src.matrix_world
+        else:
+            nested_parent, nested_parent_world = new_parent, new_parent_world
+        nested_created, nested_approximate = _decompose_into(
+            src.instance_collection,
+            transform @ _instance_space(src),
+            target_collections,
+            nested_parent,
+            nested_parent_world,
+            recursive,
+            depth + 1,
+        )
+        created.extend(nested_created)
+        approximate += nested_approximate
+    return created, approximate
+
+
+def decompose_collection_instance(
+    instancer: bpy.types.Object,
+    recursive: bool = True,
+) -> Tuple[List[bpy.types.Object], int]:
+    """Replace a collection instance with editable copies of its contents, in place.
+
+    The instanced collection itself is left untouched. Copies get their own
+    object data, land in the instancer's collections at exactly the same world
+    transforms, and keep the instancer's parent. The instancer is removed.
+    Returns (created objects, number of approximated placements).
+    """
+    coll = get_instanced_collection(instancer)
+    if coll is None:
+        return [], 0
+    target_collections = list(instancer.users_collection)
+    created, approximate = _decompose_into(
+        coll,
+        _instance_space(instancer),
+        target_collections,
+        instancer.parent,
+        instancer.parent.matrix_world.copy() if instancer.parent else None,
+        recursive,
+        0,
+    )
+    _detach_children_keep_transform(instancer, instancer.parent)
+    bpy.data.objects.remove(instancer)
+    return created, approximate
+
+
+def merge_collection_instances(
+    instancers: List[bpy.types.Object],
+    name: str,
+) -> Tuple[Optional[bpy.types.Collection], int]:
+    """Merge the collections of several instances into one new collection.
+
+    The first instancer is kept and now instances the merged collection; the
+    others are removed. Contents are copied (sources untouched) and transformed
+    so the result looks identical. Returns (new collection, number of
+    approximated placements).
+    """
+    instancers = [obj for obj in instancers if get_instanced_collection(obj) is not None]
+    if len(instancers) < 2:
+        return None, 0
+
+    keeper = instancers[0]
+    keeper_coll = keeper.instance_collection
+    keeper_offset = Vector(keeper_coll.instance_offset)
+    keeper_space_inv = (keeper.matrix_world @ Matrix.Translation(-keeper_offset)).inverted_safe()
+
+    merged = bpy.data.collections.new(name or unique_collection_name(f"{keeper_coll.name}_merged"))
+    merged.instance_offset = keeper_offset
+    approximate = 0
+
+    for instancer in instancers:
+        source = instancer.instance_collection
+        copy_root, id_map, pairs = deep_copy_collection(source)
+        transform = keeper_space_inv @ _instance_space(instancer)
+        approximate += _place_root_copies(pairs, id_map, transform)
+        for obj in list(copy_root.objects):
+            merged.objects.link(obj)
+        for child in list(copy_root.children):
+            merged.children.link(child)
+        bpy.data.collections.remove(copy_root)
+
+    link_collection_like(keeper_coll, merged)
+    keeper.instance_collection = merged
+    for instancer in instancers[1:]:
+        _detach_children_keep_transform(instancer, keeper)
+        bpy.data.objects.remove(instancer)
+    return merged, approximate
+
+
+def duplicate_instanced_collection(
+    instancers: List[bpy.types.Object],
+    name: str,
+) -> Optional[bpy.types.Collection]:
+    """Deep-copy the first instancer's collection and point matching instancers at it.
+
+    Only the given instancers that use that same collection are switched; all
+    other instances in the file keep the original.
+    """
+    instancers = [obj for obj in instancers if get_instanced_collection(obj) is not None]
+    if not instancers:
+        return None
+    source = instancers[0].instance_collection
+    new_coll, _id_map, _pairs = deep_copy_collection(source, name or unique_collection_name(source.name))
+    link_collection_like(source, new_coll)
+    for instancer in instancers:
+        if instancer.instance_collection == source:
+            instancer.instance_collection = new_coll
+    return new_coll

@@ -15,11 +15,9 @@ PIE_OPERATOR_SPECS = [
     ("pie_show_import_geometry_nodes_json", "object.import_geometry_nodes_network_from_json", "Import Geometry Nodes Network (JSON)", False),
     ("pie_show_set_origin_to_bottom_center", "object.set_origin_to_bottom_center", "Set Origin to Bottom", True),
     ("pie_show_remove_duplicate_materials", "object.remove_duplicate_materials", "Remove Duplicate Materials", True),
-    ("pie_show_move_selected_to_collection", "object.move_selected_to_collection", "Move to Collection", True),
     ("pie_show_clear_transformations_clipboard", "object.clear_transformations_clipboard", "Clear Transformations", False),
     ("pie_show_reload_all_images", "image.reload_all_images", "Reload All Images", False),
     ("pie_show_copy_render_settings_to_all_scenes", "scene.copy_render_settings_to_all_scenes", "Copy Render Settings to All Scenes", False),
-    ("pie_show_edit_instanced_collection", "collection.edit_instanced_collection", "Edit Collection", False),
 ]
 
 
@@ -54,11 +52,9 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
     pie_show_import_geometry_nodes_json: BoolProperty(name="Import Geometry Nodes Network (JSON)", default=False)
     pie_show_set_origin_to_bottom_center: BoolProperty(name="Set Origin to Bottom", default=True)
     pie_show_remove_duplicate_materials: BoolProperty(name="Remove Duplicate Materials", default=True)
-    pie_show_move_selected_to_collection: BoolProperty(name="Move to Collection", default=True)
     pie_show_clear_transformations_clipboard: BoolProperty(name="Clear Transformations", default=False)
     pie_show_reload_all_images: BoolProperty(name="Reload All Images", default=False)
     pie_show_copy_render_settings_to_all_scenes: BoolProperty(name="Copy Render Settings to All Scenes", default=False)
-    pie_show_edit_instanced_collection: BoolProperty(name="Edit Collection", default=False)
 
     def draw(self, context):
         layout = self.layout
@@ -66,6 +62,8 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
         for prop_name, _idname, label, _default in PIE_OPERATOR_SPECS:
             layout.prop(self, prop_name, text=label)
         layout.label(text="Only the first 8 enabled operators are shown in the pie menu.")
+        layout.separator()
+        layout.label(text="Pies (Object Mode): V = Utilities, C = Collections.")
 
 # This class defines the dropdown menu
 class UtilitiesMenu(bpy.types.Menu):
@@ -88,14 +86,44 @@ class UtilitiesMenu(bpy.types.Menu):
         layout.operator("object.remove_duplicate_materials", text="Remove Duplicate Materials")
         layout.operator("image.reload_all_images", text="Reload All Images")
         layout.operator("scene.copy_render_settings_to_all_scenes", text="Copy Render Settings to All Scenes")
-        layout.separator()
-        layout.operator("object.move_selected_to_collection", text="Move Selected to Collection")
 
-        # Edit/Close Collection toggle, label depends on whether an edit session is active
-        scene = context.scene
-        is_editing = bool(scene.get("custom_utils_edit_collection_name"))
-        label = "Close Collection" if is_editing else "Edit Collection"
-        layout.operator("collection.edit_instanced_collection", text=label)
+
+def _edit_collection_label(context) -> str:
+    """Edit/Close label for the edit-collection toggle, based on the active edit session."""
+    scene = context.scene
+    is_editing = bool(scene and scene.get("custom_utils_edit_collection_name"))
+    return "Close Collection" if is_editing else "Edit Collection"
+
+
+class CollectionsMenu(bpy.types.Menu):
+    bl_label = "Collections"
+    bl_idname = "VIEW3D_MT_custom_collections_menu"
+    bl_description = "Custom Utilities collection tools"
+
+    def draw(self, context):
+        layout = self.layout
+        layout.operator("collection.edit_instanced_collection", text=_edit_collection_label(context), icon='OUTLINER_COLLECTION')
+        layout.separator()
+        layout.operator("object.duplicate_instanced_collection", text="Duplicate Collection", icon='DUPLICATE')
+        layout.operator("object.decompose_collection_instance", text="Decompose Collection", icon='MOD_EXPLODE')
+        layout.operator("object.merge_collection_instances", text="Merge Collections", icon='AUTOMERGE_ON')
+        layout.separator()
+        layout.operator("object.move_selected_to_collection", text="Move Selected to Collection", icon='FORWARD')
+
+
+class VIEW3D_MT_pie_collections(bpy.types.Menu):
+    bl_label = "Collections Pie"
+    bl_idname = "VIEW3D_MT_pie_collections"
+    bl_description = "Custom Utilities collection pie menu"
+
+    def draw(self, context):
+        pie = self.layout.menu_pie()
+        # Pie order: West, East, South, North, North-West, North-East, South-West, South-East
+        pie.operator("object.decompose_collection_instance", text="Decompose Collection", icon='MOD_EXPLODE')
+        pie.operator("object.merge_collection_instances", text="Merge Collections", icon='AUTOMERGE_ON')
+        pie.operator("object.move_selected_to_collection", text="Move to Collection", icon='FORWARD')
+        pie.operator("collection.edit_instanced_collection", text=_edit_collection_label(context), icon='OUTLINER_COLLECTION')
+        pie.operator("object.duplicate_instanced_collection", text="Duplicate Collection", icon='DUPLICATE')
 
 # Pie menu
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):
@@ -118,29 +146,78 @@ class VIEW3D_MT_pie_utilities(bpy.types.Menu):
                 continue
 
             idname, label = enabled_specs[idx]
-            if idname == "collection.edit_instanced_collection":
-                scene = context.scene
-                is_editing = bool(scene.get("custom_utils_edit_collection_name"))
-                label = "Close Collection" if is_editing else "Edit Collection"
             pie.operator(idname, text=label)
 
 # This function adds the menu to the toolbar
 def draw_func(self, context):
     layout = self.layout
     layout.menu("VIEW3D_MT_custom_menu")
+    layout.menu("VIEW3D_MT_custom_collections_menu")
 
 # Adds the copy button to the top of the Render Properties tab
 def draw_render_properties_func(self, context):
     self.layout.operator("scene.copy_render_settings_to_all_scenes", icon='SCENE_DATA')
 
-# Keymap for pie menu
+# Keymaps for pie menus: (keymap name, pie menu idname, key, shift, ctrl, alt)
+# Both pies live in the Object Mode keymap: every operator in them is an object-mode
+# tool. C replaces circle select in Object Mode only; V is unbound in Object Mode.
+PIE_KEYMAPS = [
+    ("Object Mode", "VIEW3D_MT_pie_collections", 'C', False, False, False),
+    ("Object Mode", "VIEW3D_MT_pie_utilities", 'V', False, False, False),
+]
+
 addon_keymaps = []
+
+classes = (
+    CustomUtilitiesPreferences,
+    UtilitiesMenu,
+    CollectionsMenu,
+    VIEW3D_MT_pie_utilities,
+    VIEW3D_MT_pie_collections,
+)
+
+
+def _register_keymaps():
+    wm = bpy.context.window_manager
+    kc = wm.keyconfigs.addon
+    if not kc:
+        return
+    for km_name, menu_name, key, shift, ctrl, alt in PIE_KEYMAPS:
+        km = kc.keymaps.get(km_name)
+        if km is None:
+            km = kc.keymaps.new(name=km_name, space_type='EMPTY')
+        # Avoid creating duplicate keymap items
+        existing = next(
+            (
+                kmi for kmi in km.keymap_items
+                if kmi.idname == "wm.call_menu_pie"
+                and getattr(kmi.properties, "name", "") == menu_name
+            ),
+            None,
+        )
+        if existing is not None:
+            addon_keymaps.append((km, existing))
+            continue
+        kmi = km.keymap_items.new(
+            "wm.call_menu_pie", type=key, value='PRESS', shift=shift, ctrl=ctrl, alt=alt
+        )
+        kmi.properties.name = menu_name
+        addon_keymaps.append((km, kmi))
+
+
+def _unregister_keymaps():
+    for km, kmi in addon_keymaps:
+        try:
+            km.keymap_items.remove(kmi)
+        except (ReferenceError, RuntimeError):
+            pass
+    addon_keymaps.clear()
+
 
 # Registration
 def register():
-    bpy.utils.register_class(CustomUtilitiesPreferences)
-    bpy.utils.register_class(UtilitiesMenu)
-    bpy.utils.register_class(VIEW3D_MT_pie_utilities)
+    for cls in classes:
+        bpy.utils.register_class(cls)
     # Ensure the draw function is not appended twice
     try:
         bpy.types.VIEW3D_MT_editor_menus.remove(draw_func)
@@ -152,35 +229,12 @@ def register():
     except Exception:
         pass
     bpy.types.RENDER_PT_context.append(draw_render_properties_func)
+    _register_keymaps()
 
-    # Register the pie menu keymap
-    wm = bpy.context.window_manager
-    kc = wm.keyconfigs.addon
-    if kc:
-        km = kc.keymaps.get('3D View')
-        if km is None:
-            km = kc.keymaps.new(name='3D View', space_type='VIEW_3D')
-        # Avoid creating duplicate keymap items
-        exists = False
-        for kmi in km.keymap_items:
-            if (
-                kmi.idname == "wm.call_menu_pie"
-                and getattr(kmi.properties, "name", "") == "VIEW3D_MT_pie_utilities"
-                and kmi.type == 'C'
-                and kmi.value == 'PRESS'
-            ):
-                exists = True
-                break
-        if not exists:
-            kmi = km.keymap_items.new("wm.call_menu_pie", type='C', value='PRESS')
-            kmi.properties.name = "VIEW3D_MT_pie_utilities"
-            addon_keymaps.append(km)
 
 # Unregistration
 def unregister():
-    bpy.utils.unregister_class(VIEW3D_MT_pie_utilities)
-    bpy.utils.unregister_class(UtilitiesMenu)
-    bpy.utils.unregister_class(CustomUtilitiesPreferences)
+    _unregister_keymaps()
     try:
         bpy.types.VIEW3D_MT_editor_menus.remove(draw_func)
     except Exception:
@@ -189,13 +243,5 @@ def unregister():
         bpy.types.RENDER_PT_context.remove(draw_render_properties_func)
     except Exception:
         pass
-    
-    # Unregister the pie menu keymap
-    for km in addon_keymaps:
-        try:
-            keyconfigs = bpy.context.window_manager.keyconfigs.addon
-            if keyconfigs is not None:
-                keyconfigs.keymaps.remove(km)
-        except Exception:
-            pass
-    del addon_keymaps[:]
+    for cls in reversed(classes):
+        bpy.utils.unregister_class(cls)

@@ -6,7 +6,8 @@ A curated set of everyday operators for modeling and scene management:
 - Copy/Paste/Clear transformations (with light/camera extras)
 - Set origin to bottom center of bounding box
 - Remove duplicate materials (node-identical remap & cleanup)
-- Move selected objects to any collection (with name filter)
+- Collection tools (own menu and pie): edit, duplicate, decompose and merge
+  collection instances, and move selected objects to any collection
 - Copy the current scene's Render Properties to all other scenes
 
 ## Install
@@ -34,12 +35,33 @@ blender --command extension build --source-dir custom_blender_utils --output-fil
 ## Usage
 
 - Utilities menu: 3D View → Header → Utilities
-- Pie menu: press `C` in the 3D View to open “Utilities Pie”
+- Utilities pie: press `V` in Object Mode to open “Utilities Pie”
+- Collections menu: 3D View → Header → Collections
+- Collections pie: press `C` in Object Mode to open “Collections Pie”
+  (circle select stays on `C` in other modes)
 
-### Move Selected to Collection
-1. Select objects in the 3D View.
-2. Utilities → “Move Selected to Collection”.
-3. Filter collections by name, pick the target, confirm.
+### Collection Tools
+All of these work on collection instances (empties instancing a collection).
+Source collections are never modified; copies get their own object data
+(materials stay shared).
+
+- **Edit / Close Collection**: link and isolate the active instance's collection
+  for editing; run again to close.
+- **Duplicate Collection**: copy the active instance's collection (child
+  collections, objects, data) under a new name, e.g. `ladder` → `ladder-metal`,
+  and switch the selected instances of it to the copy. Other instances keep the
+  original. Internal references (parenting, modifier/GN object inputs,
+  constraints, drivers) point at the copies.
+- **Decompose Collection**: replace the selected instances with editable copies
+  of their contents at exactly the same world transforms (including instance
+  offset, nested instances, and non-uniform instance scale). Parts land in the
+  instance's collections and keep the instance's parent. “Nested Instances”
+  (redo panel) controls whether nested collection instances are decomposed too.
+- **Merge Collections**: merge the collections of 2+ selected instances into one
+  new collection instanced by the active instance; the other instances are
+  removed and nothing moves visually.
+- **Move Selected to Collection**: filter collections by name, pick the target,
+  confirm.
 
 ### Transformations Clipboard
 - Copy from selected: Utilities → “Copy Transformations”.
