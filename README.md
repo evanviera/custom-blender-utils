@@ -7,7 +7,8 @@ A curated set of everyday operators for modeling and scene management:
 - Set origin to bottom center of bounding box
 - Remove duplicate materials (node-identical remap & cleanup)
 - Collection tools (own menu and pie): edit, duplicate, decompose and merge
-  collection instances, and move selected objects to any collection
+  collection instances, replace a collection with an instance, and move
+  selected objects to any collection
 - Copy the current scene's Render Properties to all other scenes
 
 ## Install
@@ -60,6 +61,14 @@ Source collections are never modified; copies get their own object data
 - **Merge Collections**: merge the collections of 2+ selected instances into one
   new collection instanced by the active instance; the other instances are
   removed and nothing moves visually.
+- **Replace with Instance**: select any object in a collection (e.g. one block of
+  a wall). The collection is excluded from the view layer (unloaded, but kept in
+  the outliner) and replaced by an instance in exactly the same place, created
+  in the collection's parent. Redo panel: Pivot (bottom center, bounds center,
+  active object, 3D cursor, or current instance offset) and Top-Level
+  Collection (replace the outermost collection instead of the direct one). If
+  the collection is already instanced elsewhere, its instance offset is kept so
+  those instances don't move.
 - **Move Selected to Collection**: filter collections by name, pick the target,
   confirm.
 

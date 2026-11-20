@@ -2450,3 +2450,96 @@ def duplicate_instanced_collection(
         if instancer.instance_collection == source:
             instancer.instance_collection = new_coll
     return new_coll
+
+
+def get_object_collection(obj: bpy.types.Object) -> Optional[bpy.types.Collection]:
+    """The first real (non scene-master) collection that directly holds `obj`."""
+    masters = {scene.collection.as_pointer() for scene in bpy.data.scenes}
+    for coll in obj.users_collection:
+        if coll.as_pointer() not in masters:
+            return coll
+    return None
+
+
+def _collection_world_bounds(
+    coll: bpy.types.Collection,
+    depsgraph: bpy.types.Depsgraph,
+) -> Optional[Tuple[Vector, Vector]]:
+    """World-space (min, max) of everything in a collection tree, modifiers included."""
+    points: List[Vector] = []
+    for obj in _collection_tree_objects(coll):
+        evaluated = obj.evaluated_get(depsgraph)
+        matrix = evaluated.matrix_world
+        if obj.type in {'EMPTY', 'LIGHT', 'CAMERA', 'SPEAKER', 'LIGHT_PROBE'}:
+            points.append(matrix.translation.copy())
+            continue
+        points.extend(matrix @ Vector(corner) for corner in evaluated.bound_box)
+    if not points:
+        return None
+    lo = Vector((min(p.x for p in points), min(p.y for p in points), min(p.z for p in points)))
+    hi = Vector((max(p.x for p in points), max(p.y for p in points), max(p.z for p in points)))
+    return lo, hi
+
+
+def _iter_layer_collections(layer_coll: bpy.types.LayerCollection, coll: bpy.types.Collection):
+    """Every layer collection for `coll` (a collection linked twice has two)."""
+    if layer_coll.collection == coll:
+        yield layer_coll
+    for child in layer_coll.children:
+        yield from _iter_layer_collections(child, coll)
+
+
+def get_collection_instancers(coll: bpy.types.Collection) -> List[bpy.types.Object]:
+    return [obj for obj in bpy.data.objects if get_instanced_collection(obj) == coll]
+
+
+def replace_collection_with_instance(
+    context: bpy.types.Context,
+    coll: bpy.types.Collection,
+    pivot: str = 'BOTTOM_CENTER',
+) -> Tuple[bpy.types.Object, bool]:
+    """Unload `coll` from the scene and put an instance of it in exactly the same place.
+
+    The collection is excluded in every view layer of the scene (it stays in the
+    outliner, so it can be re-enabled or edited). The instance empty goes into
+    the collection's parent. `pivot` sets the instance offset and empty location:
+    'BOTTOM_CENTER', 'CENTER', 'ACTIVE', 'CURSOR' or 'KEEP' (existing offset).
+    If other objects already instance the collection, its offset is kept so they
+    don't move. Returns (instance object, offset_was_forced_to_keep).
+    """
+    scene = context.scene
+    forced_keep = False
+    if pivot != 'KEEP' and get_collection_instancers(coll):
+        pivot, forced_keep = 'KEEP', True
+
+    offset = Vector(coll.instance_offset)
+    if pivot == 'CURSOR':
+        offset = scene.cursor.location.copy()
+    elif pivot == 'ACTIVE' and context.active_object is not None:
+        offset = context.active_object.matrix_world.translation.copy()
+    elif pivot in {'BOTTOM_CENTER', 'CENTER', 'ACTIVE'}:
+        bounds = _collection_world_bounds(coll, context.evaluated_depsgraph_get())
+        if bounds is not None:
+            lo, hi = bounds
+            offset = (lo + hi) * 0.5
+            if pivot != 'CENTER':
+                offset.z = lo.z
+    coll.instance_offset = offset
+
+    # Parent the instance next to the collection, preferring a parent inside this scene.
+    scene_tree = {scene.collection.as_pointer()}
+    scene_tree.update(c.as_pointer() for c in scene.collection.children_recursive)
+    parents = [p for p in get_collection_parents(coll) if p.as_pointer() in scene_tree]
+    target = parents[0] if parents else scene.collection
+
+    instancer = bpy.data.objects.new(coll.name, None)
+    instancer.instance_type = 'COLLECTION'
+    instancer.instance_collection = coll
+    instancer.empty_display_size = 0.5
+    instancer.location = offset  # instance draws at location - offset + source = source
+    target.objects.link(instancer)
+
+    for view_layer in scene.view_layers:
+        for layer_coll in _iter_layer_collections(view_layer.layer_collection, coll):
+            layer_coll.exclude = True
+    return instancer, forced_keep

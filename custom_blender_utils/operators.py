@@ -1560,6 +1560,106 @@ class DuplicateCollectionOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+
+class ReplaceWithInstanceOperator(bpy.types.Operator):
+    bl_idname = "object.replace_collection_with_instance"
+    bl_label = "Replace with Instance"
+    bl_description = (
+        "Unload the collection(s) of the selected objects from the scene and replace each "
+        "with a collection instance in exactly the same place"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    pivot: EnumProperty(
+        name="Pivot",
+        description="Where the instance origin (and the collection's instance offset) goes",
+        items=[
+            ('BOTTOM_CENTER', "Bottom Center", "Bottom center of the collection's bounds"),
+            ('CENTER', "Bounds Center", "Center of the collection's bounds"),
+            ('ACTIVE', "Active Object", "Origin of the active object"),
+            ('CURSOR', "3D Cursor", "Location of the 3D cursor"),
+            ('KEEP', "Instance Offset", "Keep the collection's current instance offset"),
+        ],
+        default='BOTTOM_CENTER',
+    )
+    top_level: BoolProperty(
+        name="Top-Level Collection",
+        description=(
+            "Replace the outermost collection containing each object (below the scene "
+            "collection) instead of the collection that directly holds it"
+        ),
+        default=False,
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and bool(context.selected_objects)
+
+    @staticmethod
+    def _top_level(coll, scene):
+        """Walk up through parents inside this scene until just below the scene collection."""
+        scene_tree = {c.as_pointer() for c in scene.collection.children_recursive}
+        current, seen = coll, set()
+        while current.as_pointer() not in seen:
+            seen.add(current.as_pointer())
+            parents = [p for p in fn.get_collection_parents(current) if p.as_pointer() in scene_tree]
+            if not parents:
+                break
+            current = parents[0]
+        return current
+
+    def execute(self, context):
+        scene = context.scene
+        objects = list(context.selected_objects)
+        active = context.active_object
+        if active in objects:
+            objects.remove(active)
+            objects.insert(0, active)
+
+        targets, loose = [], 0
+        for obj in objects:
+            coll = fn.get_object_collection(obj)
+            if coll is None:
+                loose += 1
+                continue
+            if self.top_level:
+                coll = self._top_level(coll, scene)
+            if coll not in targets:
+                targets.append(coll)
+        # Skip collections nested inside another target; the outer one covers them.
+        targets = [
+            coll for coll in targets
+            if not any(other != coll and coll in other.children_recursive for other in targets)
+        ]
+        if not targets:
+            self.report({'WARNING'}, "Selected objects are not in a collection")
+            return {'CANCELLED'}
+
+        instancers, kept = [], []
+        for coll in targets:
+            instancer, forced_keep = fn.replace_collection_with_instance(context, coll, self.pivot)
+            instancers.append(instancer)
+            if forced_keep:
+                kept.append(coll.name)
+
+        for obj in context.view_layer.objects:
+            obj.select_set(False)
+        for instancer in instancers:
+            instancer.select_set(True)
+        context.view_layer.objects.active = instancers[0]
+
+        message = f"Replaced {len(targets)} collection(s) with instances: " + ", ".join(c.name for c in targets)
+        notes = []
+        if kept:
+            notes.append(f"kept existing instance offset of {', '.join(kept)} (already instanced elsewhere)")
+        if loose:
+            notes.append(f"skipped {loose} object(s) not in a collection")
+        if notes:
+            message += " (" + "; ".join(notes) + ")"
+        self.report({'INFO'}, message)
+        return {'FINISHED'}
+
+
 classes = [
     CUSTOMUTILS_PG_gn_network_selection_item,
     CUSTOMUTILS_PG_gn_parameter_selection_item,
@@ -1585,6 +1685,7 @@ classes = [
     DecomposeCollectionOperator,
     MergeCollectionsOperator,
     DuplicateCollectionOperator,
+    ReplaceWithInstanceOperator,
 ]
 
 def register():
