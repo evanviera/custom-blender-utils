@@ -1561,6 +1561,81 @@ class DuplicateCollectionOperator(bpy.types.Operator):
 
 
 
+class ResetCollectionAnchorOperator(bpy.types.Operator):
+    bl_idname = "object.reset_collection_anchor"
+    bl_label = "Reset Collection Anchor"
+    bl_description = (
+        "Move the anchor point (instance offset) of the selected instances' collections to the "
+        "bottom center of their contents. Every instance of the collection is compensated, so "
+        "nothing moves"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    anchor: EnumProperty(
+        name="Anchor",
+        description="Where the collection's anchor point goes",
+        items=[
+            ('BOTTOM_CENTER', "Bottom Center", "Bottom center of the collection's bounds"),
+            ('CENTER', "Bounds Center", "Center of the collection's bounds"),
+            ('CURSOR', "3D Cursor", "The 3D cursor, as seen through the selected instance"),
+            ('ORIGIN', "Collection Origin", "The collection's own origin (no offset)"),
+        ],
+        default='BOTTOM_CENTER',
+    )
+
+    @classmethod
+    def poll(cls, context):
+        return _collection_instance_poll(context)
+
+    def execute(self, context):
+        depsgraph = context.evaluated_depsgraph_get()
+        # One pass per collection; the first selected instance of it maps the cursor.
+        targets = {}
+        for instancer in fn.get_selected_collection_instances(context):
+            coll = fn.get_instanced_collection(instancer)
+            targets.setdefault(coll.as_pointer(), (coll, instancer))
+
+        done, skipped, total = [], [], {"instances": 0, "linked": 0, "animated": 0}
+        for coll, instancer in targets.values():
+            if coll.library is not None:
+                skipped.append(f"{coll.name} (linked)")
+                continue
+            if self.anchor == 'CURSOR':
+                space = fn._instance_space(instancer)
+                try:
+                    anchor = space.inverted() @ context.scene.cursor.location
+                except ValueError:
+                    anchor = None
+            else:
+                anchor = fn.collection_anchor_point(coll, depsgraph, self.anchor)
+            if anchor is None:
+                skipped.append(f"{coll.name} (empty)")
+                continue
+            counts = fn.set_collection_anchor(coll, anchor)
+            for key, value in counts.items():
+                total[key] += value
+            done.append(coll.name)
+
+        if not done:
+            self.report({'WARNING'}, "No anchor changed: " + ", ".join(skipped))
+            return {'CANCELLED'}
+
+        message = (
+            f"Reset anchor of {', '.join(done)}; compensated {total['instances']} instance(s)"
+        )
+        notes = []
+        if skipped:
+            notes.append("skipped " + ", ".join(skipped))
+        if total["linked"]:
+            notes.append(f"{total['linked']} linked instance(s) could not be adjusted and will shift")
+        if total["animated"]:
+            notes.append(f"{total['animated']} instance(s) have animated transforms; their keys were not changed")
+        if notes:
+            message += " (" + "; ".join(notes) + ")"
+        self.report({'WARNING'} if total["linked"] or total["animated"] else {'INFO'}, message)
+        return {'FINISHED'}
+
+
 class ReplaceWithInstanceOperator(bpy.types.Operator):
     bl_idname = "object.replace_collection_with_instance"
     bl_label = "Replace with Instance"
@@ -1686,6 +1761,7 @@ classes = [
     MergeCollectionsOperator,
     DuplicateCollectionOperator,
     ReplaceWithInstanceOperator,
+    ResetCollectionAnchorOperator,
 ]
 
 def register():

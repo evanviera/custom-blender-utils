@@ -108,6 +108,7 @@ class CollectionsMenu(bpy.types.Menu):
         layout.operator("object.decompose_collection_instance", text="Decompose Collection", icon='MOD_EXPLODE')
         layout.operator("object.merge_collection_instances", text="Merge Collections", icon='AUTOMERGE_ON')
         layout.operator("object.replace_collection_with_instance", text="Replace with Instance", icon='OUTLINER_OB_GROUP_INSTANCE')
+        layout.operator("object.reset_collection_anchor", text="Reset Collection Anchor", icon='PIVOT_BOUNDBOX')
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection", icon='FORWARD')
 
@@ -126,6 +127,7 @@ class VIEW3D_MT_pie_collections(bpy.types.Menu):
         pie.operator("collection.edit_instanced_collection", text=_edit_collection_label(context), icon='OUTLINER_COLLECTION')
         pie.operator("object.duplicate_instanced_collection", text="Duplicate Collection", icon='DUPLICATE')
         pie.operator("object.replace_collection_with_instance", text="Replace with Instance", icon='OUTLINER_OB_GROUP_INSTANCE')
+        pie.operator("object.reset_collection_anchor", text="Reset Collection Anchor", icon='PIVOT_BOUNDBOX')
 
 # Pie menu
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):

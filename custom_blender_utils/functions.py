@@ -2461,19 +2461,49 @@ def get_object_collection(obj: bpy.types.Object) -> Optional[bpy.types.Collectio
     return None
 
 
+_POINT_OBJECT_TYPES = {'EMPTY', 'LIGHT', 'CAMERA', 'SPEAKER', 'LIGHT_PROBE'}
+
+
+def _collect_collection_points(
+    coll: bpy.types.Collection,
+    depsgraph: bpy.types.Depsgraph,
+    transform: Matrix,
+    points: List[Vector],
+    depth: int,
+) -> None:
+    """Add bounding points of what `coll` draws (viewport-visible parts, nested instances
+    included) to `points`, in the space given by `transform`."""
+    visible, _ = _collection_tree_visibility(coll)
+    for obj in _collection_tree_objects(coll):
+        if obj.as_pointer() not in visible or obj.hide_viewport:
+            continue
+        evaluated = obj.evaluated_get(depsgraph)
+        matrix = transform @ evaluated.matrix_world
+        nested = get_instanced_collection(obj)
+        if nested is not None and depth < 16:
+            before = len(points)
+            nested_space = matrix @ Matrix.Translation(-Vector(nested.instance_offset))
+            _collect_collection_points(nested, depsgraph, nested_space, points, depth + 1)
+            if len(points) > before:
+                continue
+        if obj.type in _POINT_OBJECT_TYPES:
+            points.append(matrix.translation.copy())
+            continue
+        points.extend(matrix @ Vector(corner) for corner in evaluated.bound_box)
+
+
 def _collection_world_bounds(
     coll: bpy.types.Collection,
     depsgraph: bpy.types.Depsgraph,
 ) -> Optional[Tuple[Vector, Vector]]:
-    """World-space (min, max) of everything in a collection tree, modifiers included."""
+    """(min, max) of everything a collection tree draws, modifiers and nested instances
+    included, in collection space (= world space for objects placed directly in the scene).
+
+    Works for collections excluded from the view layer as long as something instances
+    them, since the depsgraph still evaluates their objects for the instance.
+    """
     points: List[Vector] = []
-    for obj in _collection_tree_objects(coll):
-        evaluated = obj.evaluated_get(depsgraph)
-        matrix = evaluated.matrix_world
-        if obj.type in {'EMPTY', 'LIGHT', 'CAMERA', 'SPEAKER', 'LIGHT_PROBE'}:
-            points.append(matrix.translation.copy())
-            continue
-        points.extend(matrix @ Vector(corner) for corner in evaluated.bound_box)
+    _collect_collection_points(coll, depsgraph, Matrix.Identity(4), points, 0)
     if not points:
         return None
     lo = Vector((min(p.x for p in points), min(p.y for p in points), min(p.z for p in points)))
@@ -2543,3 +2573,82 @@ def replace_collection_with_instance(
         for layer_coll in _iter_layer_collections(view_layer.layer_collection, coll):
             layer_coll.exclude = True
     return instancer, forced_keep
+
+
+_TRANSFORM_PATHS = {
+    "location", "rotation_euler", "rotation_quaternion", "rotation_axis_angle", "scale",
+    "delta_location", "delta_rotation_euler", "delta_rotation_quaternion", "delta_scale",
+    "matrix_world", "matrix_basis",
+}
+
+
+def _has_animated_transform(obj: bpy.types.Object) -> bool:
+    """True when keyframes or drivers drive the object's transform (and would undo edits)."""
+    anim = obj.animation_data
+    if anim is None:
+        return False
+    paths = [driver.data_path for driver in anim.drivers]
+    action = anim.action
+    if action is not None:
+        fcurves = None
+        try:
+            from bpy_extras.anim_utils import action_get_channelbag_for_slot
+            channelbag = action_get_channelbag_for_slot(action, getattr(anim, "action_slot", None))
+            fcurves = channelbag.fcurves if channelbag is not None else None
+        except (ImportError, AttributeError, TypeError):
+            fcurves = getattr(action, "fcurves", None)
+        if fcurves is not None:
+            paths.extend(fc.data_path for fc in fcurves)
+    return any(path in _TRANSFORM_PATHS for path in paths)
+
+
+def collection_anchor_point(
+    coll: bpy.types.Collection,
+    depsgraph: bpy.types.Depsgraph,
+    mode: str = 'BOTTOM_CENTER',
+) -> Optional[Vector]:
+    """Anchor in collection space: 'BOTTOM_CENTER' or 'CENTER' of the bounds, or 'ORIGIN'."""
+    if mode == 'ORIGIN':
+        return Vector((0.0, 0.0, 0.0))
+    bounds = _collection_world_bounds(coll, depsgraph)
+    if bounds is None:
+        return None
+    lo, hi = bounds
+    anchor = (lo + hi) * 0.5
+    if mode == 'BOTTOM_CENTER':
+        anchor.z = lo.z
+    return anchor
+
+
+def set_collection_anchor(coll: bpy.types.Collection, anchor: Vector) -> Dict[str, int]:
+    """Move `coll`'s instance offset (its anchor) to `anchor`, in collection space, without
+    anything moving: every instance of the collection in the file is shifted to compensate.
+
+    An instance draws at instancer.matrix_world @ T(-offset), so with d = new - old offset
+    the instancer needs matrix_world @ T(d). That is location += basis_3x3 @ d, which is
+    exact and independent of parenting. Children of an instancer get T(-d) folded into
+    their parent inverse so they stay put too.
+
+    Returns counts: 'instances' compensated, 'linked' (library instancers that could not be
+    edited and will appear to move), 'animated' (transform driven by keys/drivers).
+    """
+    delta = Vector(anchor) - Vector(coll.instance_offset)
+    result = {"instances": 0, "linked": 0, "animated": 0}
+    if delta.length == 0.0:
+        result["instances"] = len(get_collection_instancers(coll))
+        return result
+
+    correction = Matrix.Translation(-delta)
+    for instancer in get_collection_instancers(coll):
+        if instancer.library is not None:
+            result["linked"] += 1
+            continue
+        if _has_animated_transform(instancer):
+            result["animated"] += 1
+        instancer.location = instancer.location + instancer.matrix_basis.to_3x3() @ delta
+        for child in instancer.children:
+            if child.library is None:
+                child.matrix_parent_inverse = correction @ child.matrix_parent_inverse
+        result["instances"] += 1
+    coll.instance_offset = anchor
+    return result
