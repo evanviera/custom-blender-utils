@@ -1729,6 +1729,65 @@ class ResetCollectionAnchorOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+class ApplyCollectionTransformOperator(bpy.types.Operator):
+    bl_idname = "object.apply_collection_transform"
+    bl_label = "Apply Collection Transform"
+    bl_description = (
+        "Apply the active instance's rotation and scale to its collection, about the "
+        "collection's anchor. Every instance of the collection is compensated, so nothing "
+        "moves in any scene"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    rotation: BoolProperty(name="Rotation", description="Apply the instance's rotation", default=True)
+    scale: BoolProperty(name="Scale", description="Apply the instance's scale", default=True)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and fn.get_instanced_collection(context.active_object) is not None
+
+    def execute(self, context):
+        instancer = context.active_object
+        coll = fn.get_instanced_collection(instancer)
+        if not (self.rotation or self.scale):
+            self.report({'WARNING'}, "Nothing to apply: enable Rotation and/or Scale")
+            return {'CANCELLED'}
+
+        apply = fn.instance_apply_matrix(instancer, self.rotation, self.scale)
+        if fn._is_identity(apply):
+            what = " and ".join(name for name, on in (("rotation", self.rotation), ("scale", self.scale)) if on)
+            self.report({'INFO'}, f"'{instancer.name}' has no {what} to apply")
+            return {'CANCELLED'}
+
+        problems = fn.apply_collection_transform_problems(coll, apply, instancer)
+        if problems:
+            message = f"Can't apply transform to '{coll.name}': " + "; ".join(problems[:3])
+            if len(problems) > 3:
+                message += f" (and {len(problems) - 3} more)"
+            self.report({'ERROR'}, message)
+            return {'CANCELLED'}
+
+        result = fn.apply_collection_transform(coll, apply)
+
+        stage = fn.get_stage_scene()
+        notes = []
+        if result["baked"]:
+            notes.append(f"shear baked into the data of {result['baked']} object(s)")
+        if result["animated"]:
+            notes.append(f"{result['animated']} instance(s) have animated transforms; their keys were not changed")
+        direct = [scene.name for scene in fn._scenes_showing(coll, stage)]
+        if direct:
+            notes.append(f"shown directly (not instanced) in {', '.join(direct)}, where it turns")
+        if stage is not None and coll in fn.get_stage_collections(stage):
+            notes.append("on the Collection Stage; Update Collection Stage with Relayout All if it now overlaps")
+
+        message = f"Applied transform to '{coll.name}'; compensated {result['instances']} instance(s)"
+        if notes:
+            message += " (" + "; ".join(notes) + ")"
+        self.report({'WARNING'} if result["animated"] or direct else {'INFO'}, message)
+        return {'FINISHED'}
+
+
 class ReplaceWithInstanceOperator(bpy.types.Operator):
     bl_idname = "object.replace_collection_with_instance"
     bl_label = "Replace with Instance"
@@ -2122,6 +2181,7 @@ classes = [
     DuplicateCollectionOperator,
     ReplaceWithInstanceOperator,
     ResetCollectionAnchorOperator,
+    ApplyCollectionTransformOperator,
     UpdateCollectionStageOperator,
     SendCollectionToStageOperator,
     ToggleCollectionStageOperator,

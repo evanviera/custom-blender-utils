@@ -8,7 +8,8 @@ A curated set of everyday operators for modeling and scene management:
 - Remove duplicate materials (node-identical remap & cleanup)
 - Collection tools (own menu and pie): edit, duplicate, decompose and merge
   collection instances, replace a collection with an instance, reset a
-  collection's anchor point, and move selected objects to any collection
+  collection's anchor point, apply an instance's rotation/scale to its
+  collection, and move selected objects to any collection
 - Collection Stage: a dedicated scene with every asset collection laid out in its
   own spot for editing, without moving any instance in any scene or file
 - Copy the current scene's Render Properties to all other scenes
@@ -80,6 +81,20 @@ Source collections are never modified; copies get their own object data
   bounds center, 3D cursor, or the collection origin). Instances with animated
   transforms or linked from a library are reported, since they can't be
   compensated.
+- **Apply Collection Transform**: select a rotated and/or scaled instance; its
+  rotation and scale are applied to the collection itself, about the
+  collection's anchor, so the instance ends up with no rotation and a scale of
+  1. Every instance of the collection (and of its child collections) in the
+  file is counter-rotated/scaled, so none of them moves in any scene. Redo
+  panel: Rotation, Scale. It refuses (and says why) rather than move
+  something: objects shared with or parented to objects outside the
+  collection, animated or constrained top-level objects, or an instance whose
+  scale differs non-uniformly from the selected one while rotated
+  differently (it would need shear; parented instances absorb it in their
+  parent inverse). Objects needing shear get it baked into their own data
+  when it isn't shared. Only collection-instance empties are compensated:
+  Geometry Nodes Collection Info, particles, and other files linking the
+  collection are not.
 - **Move Selected to Collection**: filter collections by name, pick the target,
   confirm.
 

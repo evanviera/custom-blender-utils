@@ -125,6 +125,7 @@ class CollectionsMenu(bpy.types.Menu):
         layout.operator("object.merge_collection_instances", text="Merge Collections", icon='AUTOMERGE_ON')
         layout.operator("object.replace_collection_with_instance", text="Replace with Instance", icon='OUTLINER_OB_GROUP_INSTANCE')
         layout.operator("object.reset_collection_anchor", text="Reset Collection Anchor", icon='PIVOT_BOUNDBOX')
+        layout.operator("object.apply_collection_transform", text="Apply Collection Transform", icon='CON_TRANSLIKE')
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection", icon='FORWARD')
         layout.separator()

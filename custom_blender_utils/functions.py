@@ -2214,6 +2214,20 @@ def _detach_children_keep_transform(
         _set_world_transform(child, child.matrix_world.copy(), new_parent, parent_world)
 
 
+def _can_bake_into_data(obj: bpy.types.Object) -> bool:
+    """True when obj's data is its own and can take a transform (mesh, curve, ...)."""
+    data = obj.data
+    return data is not None and data.library is None and data.users == 1 and hasattr(data, "transform")
+
+
+def _transform_data(data: bpy.types.ID, matrix: Matrix) -> None:
+    """Transform object data, shape keys included where the data type has them."""
+    try:
+        data.transform(matrix, shape_keys=True)
+    except TypeError:
+        data.transform(matrix)
+
+
 def _is_identity(matrix: Matrix, tolerance: float = 1e-5) -> bool:
     identity = Matrix.Identity(4)
     return all(abs(matrix[r][c] - identity[r][c]) <= tolerance for r in range(4) for c in range(4))
@@ -2255,8 +2269,8 @@ def _set_world_transform(
         return True
 
     data = obj.data
-    if allow_bake and data is not None and data.users == 1 and hasattr(data, "transform"):
-        data.transform(residual)
+    if allow_bake and _can_bake_into_data(obj):
+        _transform_data(data, residual)
         for child in children or ():
             child.matrix_parent_inverse = residual @ child.matrix_parent_inverse
         return True
@@ -2660,6 +2674,186 @@ def set_collection_anchor(coll: bpy.types.Collection, anchor: Vector) -> Dict[st
                 child.matrix_parent_inverse = correction @ child.matrix_parent_inverse
         result["instances"] += 1
     coll.instance_offset = anchor
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Apply an instance's rotation/scale to its collection.
+#
+# An instance draws its collection's contents at W @ T(-o) @ contents (W the
+# instancer's world matrix, o the instance offset). With A the rotation/scale to
+# apply, the contents are transformed by K = T(o) @ A @ T(-o) (about the anchor,
+# so o stays put) and every instancer gets W' = W @ A^-1:
+#     W @ A^-1 @ T(-o) @ K = W @ A^-1 @ T(-o) @ T(o) @ A @ T(-o) = W @ T(-o)
+# so every instance draws exactly as before. The instance A came from ends up
+# with no rotation/scale. A child collection c in the tree gets o_c' = K @ o_c;
+# its instances need the same W @ A^-1, since T(-o_c) @ K^-1 @ T(K @ o_c) = A^-1.
+# W @ A^-1 is a change of matrix_basis (basis @ A^-1), so it is exact whatever
+# the instancer is parented to.
+# ---------------------------------------------------------------------------
+
+def instance_apply_matrix(instancer: bpy.types.Object, rotation: bool, scale: bool) -> Matrix:
+    """The rotation and/or scale of an instance's own transform (its matrix_basis, like
+    Ctrl+A), as a 4x4 linear transform to apply to its collection."""
+    basis = instancer.matrix_basis
+    if rotation and scale:
+        return basis.to_3x3().to_4x4()
+    _loc, rot, size = basis.decompose()
+    if rotation:
+        return rot.to_matrix().to_4x4()
+    if scale:
+        return Matrix.Diagonal(size).to_4x4()
+    return Matrix.Identity(4)
+
+
+def _is_loc_rot_scale(matrix: Matrix) -> bool:
+    """True when `matrix` is exactly loc/rot/scale (no shear), as _set_world_transform sees it."""
+    loc, rot, scale = matrix.decompose()
+    return _is_identity(Matrix.LocRotScale(loc, rot, scale).inverted_safe() @ matrix)
+
+
+def _has_constraints(obj: bpy.types.Object) -> bool:
+    return any(con.enabled and con.influence > 0.0 for con in obj.constraints)
+
+
+def _tree_instancers(tree: List[bpy.types.Collection]) -> List[bpy.types.Object]:
+    """Every object instancing a collection of `tree`."""
+    tree_ptrs = {c.as_pointer() for c in tree}
+    return [
+        obj for obj in bpy.data.objects
+        if (nested := get_instanced_collection(obj)) is not None and nested.as_pointer() in tree_ptrs
+    ]
+
+
+def apply_collection_transform_problems(
+    coll: bpy.types.Collection,
+    apply: Matrix,
+    active: Optional[bpy.types.Object] = None,
+) -> List[str]:
+    """Reasons `apply` cannot be applied to `coll` without something moving (empty when it can).
+
+    Nothing is changed. Checked: the collection's objects can be transformed as one block
+    (none linked, shared with or parented to objects outside, animated or constrained at the
+    top level), every top-level object can hold its new transform (or take shear into its
+    own data), and every instance can hold the inverse (shear needs a parent to absorb it).
+    """
+    if coll.library is not None or coll.override_library is not None:
+        return ["the collection is linked from a library"]
+    if abs(apply.to_3x3().determinant()) < 1e-12:
+        return ["the instance has zero scale"]
+
+    offset = Vector(coll.instance_offset)
+    transform = Matrix.Translation(offset) @ apply @ Matrix.Translation(-offset)
+    inverse = apply.inverted()
+    tree = _collection_tree(coll)
+    tree_ptrs = {c.as_pointer() for c in tree}
+    objects = _collection_tree_objects(coll)
+    object_ptrs = {obj.as_pointer() for obj in objects}
+
+    problems: List[str] = []
+    for obj in objects:
+        if obj.library is not None:
+            problems.append(f"object '{obj.name}' is linked from a library")
+            continue
+        outside = [c for c in obj.users_collection if c.as_pointer() not in tree_ptrs]
+        if outside:
+            problems.append(f"object '{obj.name}' is also in collection '{outside[0].name}'")
+        if obj.parent is not None and obj.parent.as_pointer() not in object_ptrs:
+            problems.append(f"object '{obj.name}' is parented to '{obj.parent.name}' outside the collection")
+        stray = [child for child in obj.children if child.as_pointer() not in object_ptrs]
+        if stray:
+            problems.append(f"object '{stray[0].name}' outside the collection is parented to '{obj.name}'")
+        nested = get_instanced_collection(obj)
+        if nested is not None and nested.as_pointer() in tree_ptrs:
+            problems.append(f"object '{obj.name}' instances '{nested.name}', which is inside the collection")
+        if obj.parent is not None:
+            continue  # follows its parent
+        if _has_animated_transform(obj):
+            problems.append(f"object '{obj.name}' has an animated transform")
+        if _has_constraints(obj):
+            problems.append(f"object '{obj.name}' has constraints")
+        if not _is_loc_rot_scale(transform @ obj.matrix_basis) and not _can_bake_into_data(obj):
+            problems.append(
+                f"object '{obj.name}' would need shear (non-uniform scale over its rotation) "
+                f"and its data can't take it"
+            )
+
+    for instancer in _tree_instancers(tree):
+        if instancer.as_pointer() in object_ptrs:
+            continue  # reported above
+        if instancer.library is not None:
+            problems.append(f"instance '{instancer.name}' is linked from a library")
+            continue
+        if instancer.parent is None and not _is_loc_rot_scale(instancer.matrix_basis @ inverse):
+            if instancer == active:
+                problems.append(
+                    "rotation can't be applied on its own while the instance has non-uniform "
+                    "scale; apply rotation and scale together"
+                )
+            else:
+                problems.append(
+                    f"instance '{instancer.name}' would need shear to stay in place (its "
+                    f"rotation/scale differs non-uniformly from the active instance's)"
+                )
+    return problems
+
+
+def _post_multiply_basis(obj: bpy.types.Object, matrix: Matrix) -> None:
+    """Make obj's world matrix W @ matrix, exactly when it is representable: its basis takes
+    the loc/rot/scale part and its parent inverse (if parented) any leftover shear.
+    Children keep their world transforms."""
+    old_basis = obj.matrix_basis.copy()
+    target = old_basis @ matrix
+    loc, rot, scale = target.decompose()
+    new_basis = Matrix.LocRotScale(loc, rot, scale)
+    if obj.parent is not None and not _is_identity(new_basis.inverted_safe() @ target):
+        # W = Pw @ Pinv @ basis: Pinv' @ new_basis must equal Pinv @ target.
+        obj.matrix_parent_inverse = obj.matrix_parent_inverse @ target @ new_basis.inverted_safe()
+        change = matrix
+    elif obj.parent is not None:
+        change = matrix
+    else:
+        change = old_basis.inverted_safe() @ new_basis
+    obj.matrix_basis = new_basis
+    undo = change.inverted_safe()
+    for child in obj.children:
+        if child.library is None:
+            child.matrix_parent_inverse = undo @ child.matrix_parent_inverse
+
+
+def apply_collection_transform(coll: bpy.types.Collection, apply: Matrix) -> Dict[str, int]:
+    """Apply the linear transform `apply` (rotation/scale) to `coll`'s contents about its
+    anchor, compensating every instance of the collection (and of its child collections) in
+    the file so that nothing moves. Check `apply_collection_transform_problems` first.
+
+    Returns counts: 'instances' adjusted, 'animated' instances whose keys/drivers were left
+    alone, 'baked' objects whose shear went into their own data.
+    """
+    offset = Vector(coll.instance_offset)
+    transform = Matrix.Translation(offset) @ apply @ Matrix.Translation(-offset)
+    inverse = apply.inverted()
+    tree = _collection_tree(coll)
+    objects = _collection_tree_objects(coll)
+    object_ptrs = {obj.as_pointer() for obj in objects}
+    instancers = [obj for obj in _tree_instancers(tree) if obj.as_pointer() not in object_ptrs]
+
+    result = {"instances": 0, "animated": 0, "baked": 0}
+    for obj in objects:
+        if obj.parent is not None:
+            continue  # follows its parent
+        target = transform @ obj.matrix_basis
+        if not _is_loc_rot_scale(target):
+            result["baked"] += 1
+        _set_world_transform(obj, target, None, None, list(obj.children), allow_bake=True)
+
+    for child in tree:
+        child.instance_offset = transform @ Vector(child.instance_offset)
+
+    for instancer in instancers:
+        if _has_animated_transform(instancer):
+            result["animated"] += 1
+        _post_multiply_basis(instancer, inverse)
+        result["instances"] += 1
     return result
 
 
