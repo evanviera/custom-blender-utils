@@ -7,8 +7,8 @@ A curated set of everyday operators for modeling and scene management:
 - Set origin to bottom center of bounding box
 - Remove duplicate materials (node-identical remap & cleanup)
 - Collection tools (own menu and pie): edit, duplicate, decompose and merge
-  collection instances, replace a collection with an instance, and move
-  selected objects to any collection
+  collection instances, replace a collection with an instance, reset a
+  collection's anchor point, and move selected objects to any collection
 - Copy the current scene's Render Properties to all other scenes
 
 ## Install
@@ -47,7 +47,9 @@ Source collections are never modified; copies get their own object data
 (materials stay shared).
 
 - **Edit / Close Collection**: link and isolate the active instance's collection
-  for editing; run again to close.
+  for editing; run again to close. Works on collections excluded from the view
+  layer (e.g. after Replace with Instance): they are shown while editing and
+  excluded again on close.
 - **Duplicate Collection**: copy the active instance's collection (child
   collections, objects, data) under a new name, e.g. `ladder` → `ladder-metal`,
   and switch the selected instances of it to the copy. Other instances keep the
@@ -69,6 +71,13 @@ Source collections are never modified; copies get their own object data
   Collection (replace the outermost collection instead of the direct one). If
   the collection is already instanced elsewhere, its instance offset is kept so
   those instances don't move.
+- **Reset Collection Anchor**: select an instance; its collection's anchor point
+  (instance offset) moves to the bottom center of the collection's contents.
+  Every instance of the collection in the file (any scene, nested or parented) is
+  shifted to compensate, so nothing moves. Redo panel: Anchor (bottom center,
+  bounds center, 3D cursor, or the collection origin). Instances with animated
+  transforms or linked from a library are reported, since they can't be
+  compensated.
 - **Move Selected to Collection**: filter collections by name, pick the target,
   confirm.
 

@@ -6,6 +6,8 @@ focus on discrete actions such as measuring, copying/pasting transformations,
 cleaning materials, changing origins, and moving objects between collections.
 """
 
+import json
+
 from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty, CollectionProperty
 
 from . import functions as fn
@@ -896,6 +898,9 @@ EDIT_COLLECTION_NAME_KEY = "custom_utils_edit_collection_name"
 EDIT_COLLECTION_LINKED_KEY = "custom_utils_edit_collection_linked_by_operator"
 EDIT_COLLECTION_AREA_POINTER_KEY = "custom_utils_edit_collection_area_ptr"
 EDIT_COLLECTION_REGION_POINTER_KEY = "custom_utils_edit_collection_region_ptr"
+# JSON {"view_layer": name, "changes": [[path, prop], ...]}: layer-collection flags the
+# edit session turned off (exclude / hide) so the collection's objects are editable.
+EDIT_COLLECTION_RESTORE_KEY = "custom_utils_edit_collection_restore"
 
 
 class CUSTOMUTILS_UL_collection_picker(bpy.types.UIList):
@@ -1189,13 +1194,15 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
     ):
         """Prepare the scene and view for editing this collection.
 
-        Returns a tuple: (linked_now, area_id, region_id).
+        Returns a tuple: (linked_now, area_id, region_id, restore), where restore is the
+        layer-collection state to put back on close (see EDIT_COLLECTION_RESTORE_KEY).
         """
         scene = context.scene
         scene_collection = scene.collection
         linked_now = False
         area_id = None
         region_id = None
+        restore = None
 
         # Ensure the collection is linked to the scene's master collection
         if collection.name in scene_collection.children:
@@ -1217,13 +1224,20 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
                 if "already linked" not in error_msg.lower() and "already in" not in error_msg.lower():
                     raise
 
+        # The collection may be excluded or hidden in this view layer (e.g. after Replace
+        # with Instance); its objects are then not in the view layer and can't be selected.
+        view_layer = context.view_layer
+        changes = EditInstancedCollectionOperator._reveal_layer_collection(view_layer, collection)
+        if changes:
+            restore = {"view_layer": view_layer.name, "changes": changes}
+
         # Collect all objects in the collection, including nested child collections
         objs_in_collection = EditInstancedCollectionOperator._gather_objects_from_collection(
             collection
         )
 
         if not objs_in_collection:
-            return linked_now, area_id, region_id
+            return linked_now, area_id, region_id, restore
 
         # Ensure we're in Object mode so view operators work reliably
         if context.mode != 'OBJECT':
@@ -1236,12 +1250,22 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         for obj_sel in list(context.selected_objects):
             obj_sel.select_set(False)
 
-        for o in objs_in_collection:
-            o.select_set(True)
+        # Only objects that made it into the view layer can be selected (objects in child
+        # collections disabled in viewports, or hidden per object, stay out).
+        in_view_layer = {o.as_pointer() for o in view_layer.objects}
+        selected = []
+        for o in sorted(objs_in_collection, key=lambda ob: ob.name):
+            if o.as_pointer() not in in_view_layer:
+                continue
+            try:
+                o.select_set(True)
+            except RuntimeError:
+                continue
+            selected.append(o)
 
         # Set an active object from the collection
-        active_obj = next(iter(objs_in_collection))
-        context.view_layer.objects.active = active_obj
+        if selected:
+            view_layer.objects.active = selected[0]
 
         # Isolate and frame in the active 3D View (if we are in one)
         area = getattr(context, "area", None)
@@ -1261,7 +1285,61 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
                 except Exception:
                     pass
 
-        return linked_now, area_id, region_id
+        return linked_now, area_id, region_id, restore
+
+    @staticmethod
+    def _edit_layer_collection(view_layer, collection):
+        """The collection's layer collection directly under the view layer root, or None."""
+        for layer_coll in view_layer.layer_collection.children:
+            if layer_coll.collection == collection:
+                return layer_coll
+        return None
+
+    @staticmethod
+    def _reveal_layer_collection(view_layer, collection):
+        """Turn off exclude / hide on the collection's layer collection and its children.
+
+        Returns [[path, prop], ...] in the order applied; path lists child collection names
+        below the collection's own layer collection.
+        """
+        root = EditInstancedCollectionOperator._edit_layer_collection(view_layer, collection)
+        changes = []
+        if root is None:
+            return changes
+
+        def _walk(layer_coll, path):
+            for prop in ("exclude", "hide_viewport"):
+                if getattr(layer_coll, prop, False):
+                    setattr(layer_coll, prop, False)
+                    changes.append([list(path), prop])
+            for child in layer_coll.children:
+                _walk(child, path + [child.collection.name])
+
+        _walk(root, [])
+        return changes
+
+    @staticmethod
+    def _restore_layer_collection(scene, collection, restore) -> None:
+        """Put back the layer-collection flags recorded by _reveal_layer_collection."""
+        if not restore:
+            return
+        view_layer = scene.view_layers.get(restore.get("view_layer", ""))
+        if view_layer is None:
+            return
+        root = EditInstancedCollectionOperator._edit_layer_collection(view_layer, collection)
+        if root is None:
+            return
+        for path, prop in reversed(restore.get("changes", [])):
+            layer_coll = root
+            for name in path:
+                layer_coll = next((c for c in layer_coll.children if c.collection.name == name), None)
+                if layer_coll is None:
+                    break
+            if layer_coll is not None:
+                try:
+                    setattr(layer_coll, prop, True)
+                except (AttributeError, TypeError):
+                    pass
 
     @staticmethod
     def _close_edit_collection(
@@ -1270,6 +1348,7 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         linked_by_operator: bool,
         preferred_area_id=None,
         preferred_region_id=None,
+        restore=None,
     ) -> None:
         """Close editing for the given collection: exit local view and optionally unlink."""
         scene = context.scene
@@ -1279,6 +1358,10 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         EditInstancedCollectionOperator._exit_local_view_if_active(
             context, preferred_area_id, preferred_region_id
         )
+
+        # Re-exclude / re-hide what the session revealed (no-op if we unlink below)
+        if not linked_by_operator:
+            EditInstancedCollectionOperator._restore_layer_collection(scene, collection, restore)
 
         # Only unlink if this operator originally linked the collection
         if linked_by_operator and collection.name in scene_collection.children:
@@ -1314,6 +1397,10 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         )
         stored_area_id = scene.get(EDIT_COLLECTION_AREA_POINTER_KEY)
         stored_region_id = scene.get(EDIT_COLLECTION_REGION_POINTER_KEY)
+        try:
+            stored_restore = json.loads(scene.get(EDIT_COLLECTION_RESTORE_KEY) or "null")
+        except (TypeError, ValueError):
+            stored_restore = None
 
         # Determine whether we're closing the same collection we would otherwise edit
         closing_same = (
@@ -1330,6 +1417,7 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
                 linked_flag,
                 stored_area_id or None,
                 stored_region_id or None,
+                stored_restore,
             )
             # Clear state
             for key in (
@@ -1337,6 +1425,7 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
                 EDIT_COLLECTION_LINKED_KEY,
                 EDIT_COLLECTION_AREA_POINTER_KEY,
                 EDIT_COLLECTION_REGION_POINTER_KEY,
+                EDIT_COLLECTION_RESTORE_KEY,
             ):
                 if key in scene:
                     del scene[key]
@@ -1356,7 +1445,7 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
 
         # Start editing the new target collection
         try:
-            linked_now, new_area_id, new_region_id = self._start_edit_collection(
+            linked_now, new_area_id, new_region_id, restore = self._start_edit_collection(
                 context, target_collection
             )
         except RuntimeError as e:
@@ -1366,6 +1455,10 @@ class EditInstancedCollectionOperator(bpy.types.Operator):
         # Persist edit-session state on the scene
         scene[EDIT_COLLECTION_NAME_KEY] = target_collection.name
         scene[EDIT_COLLECTION_LINKED_KEY] = bool(linked_now)
+        if restore:
+            scene[EDIT_COLLECTION_RESTORE_KEY] = json.dumps(restore)
+        else:
+            scene.pop(EDIT_COLLECTION_RESTORE_KEY, None)
         if new_area_id:
             scene[EDIT_COLLECTION_AREA_POINTER_KEY] = new_area_id
         else:
