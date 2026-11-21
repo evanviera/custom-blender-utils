@@ -11,6 +11,7 @@ import json
 from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty, CollectionProperty
 
 from . import functions as fn
+from . import preferences as prefs_mod
 
 class DistanceMeasureOperator(bpy.types.Operator):
     bl_idname = "object.measure_surface_point"
@@ -19,7 +20,13 @@ class DistanceMeasureOperator(bpy.types.Operator):
 
     def modal(self, context, event):
         if event.type == 'LEFTMOUSE' and event.value == 'PRESS':
-            fn.handle_mouse_click(context, event, self)
+            fn.handle_mouse_click(
+                context,
+                event,
+                self,
+                precision=prefs_mod.pref(context, "measure_precision", 2),
+                copy_to_clipboard=prefs_mod.pref(context, "measure_copy_to_clipboard", True),
+            )
             return {'FINISHED'}
 
         return {'PASS_THROUGH'}
@@ -162,7 +169,10 @@ class PasteGeometryNodesModifierAttributesOperator(bpy.types.Operator):
         name="Exclude Active Object",
         description="Skip the active object when pasting to selected objects",
         default=False,
+        options={'SKIP_SAVE'},
     )
+
+    _PREF_DEFAULTS = {"exclude_active": "gn_paste_exclude_active"}
 
     @staticmethod
     def _populate_selection_lists(context: bpy.types.Context) -> bool:
@@ -195,6 +205,7 @@ class PasteGeometryNodesModifierAttributesOperator(bpy.types.Operator):
         return bool(wm.custom_utils_gn_parameter_selection_items)
 
     def invoke(self, context, event):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         if not fn.has_geometry_nodes_modifiers_data():
             self.report({'WARNING'}, "Geometry Nodes clipboard is empty")
             return {'CANCELLED'}
@@ -522,7 +533,9 @@ class ExportGeometryNodesNetworkToJSONOperator(bpy.types.Operator):
                 if choice.get('group_key', '') == self.network_key:
                     selected_name = choice.get('name', selected_name)
                     break
-            self.filepath = fn.get_default_geometry_nodes_export_filepath(selected_name)
+            self.filepath = fn.get_default_geometry_nodes_export_filepath(
+                selected_name, prefs_mod.pref(context, "gn_export_directory", "")
+            )
 
         return context.window_manager.invoke_props_dialog(self, width=620)
 
@@ -598,9 +611,13 @@ class ImportGeometryNodesNetworkFromJSONOperator(bpy.types.Operator):
         name="Attach to Active Object",
         description="Create a Geometry Nodes modifier on the active object using the imported root group",
         default=True,
+        options={'SKIP_SAVE'},
     )
 
+    _PREF_DEFAULTS = {"attach_to_active_object": "gn_import_attach"}
+
     def invoke(self, context, event):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         if not self.filepath:
             blend_path = bpy.data.filepath
             if blend_path:
@@ -851,7 +868,10 @@ class CopyRenderSettingsToAllScenesOperator(bpy.types.Operator):
         name="Include Output Properties",
         description="Also copy Output tab settings: resolution, frame rate, output path, file format and metadata",
         default=False,
+        options={'SKIP_SAVE'},
     )
+
+    _PREF_DEFAULTS = {"include_output": "render_include_output"}
 
     @staticmethod
     def _target_scenes(context: bpy.types.Context):
@@ -865,6 +885,7 @@ class CopyRenderSettingsToAllScenesOperator(bpy.types.Operator):
         return context.scene is not None and len(bpy.data.scenes) > 1
 
     def invoke(self, context, event):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         if not self._target_scenes(context):
             self.report({'WARNING'}, "No other editable scenes in this file")
             return {'CANCELLED'}
@@ -1503,13 +1524,17 @@ class DecomposeCollectionOperator(bpy.types.Operator):
         name="Nested Instances",
         description="Also decompose collection instances nested inside the collection",
         default=True,
+        options={'SKIP_SAVE'},
     )
+
+    _PREF_DEFAULTS = {"recursive": "decompose_nested"}
 
     @classmethod
     def poll(cls, context):
         return _collection_instance_poll(context)
 
     def execute(self, context):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         instancers = fn.get_selected_collection_instances(context)
         if not instancers:
             self.report({'WARNING'}, "Select at least one collection instance")
@@ -1667,20 +1692,19 @@ class ResetCollectionAnchorOperator(bpy.types.Operator):
     anchor: EnumProperty(
         name="Anchor",
         description="Where the collection's anchor point goes",
-        items=[
-            ('BOTTOM_CENTER', "Bottom Center", "Bottom center of the collection's bounds"),
-            ('CENTER', "Bounds Center", "Center of the collection's bounds"),
-            ('CURSOR', "3D Cursor", "The 3D cursor, as seen through the selected instance"),
-            ('ORIGIN', "Collection Origin", "The collection's own origin (no offset)"),
-        ],
+        items=prefs_mod.RESET_ANCHOR_ITEMS,
         default='BOTTOM_CENTER',
+        options={'SKIP_SAVE'},
     )
+
+    _PREF_DEFAULTS = {"anchor": "reset_anchor"}
 
     @classmethod
     def poll(cls, context):
         return _collection_instance_poll(context)
 
     def execute(self, context):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         depsgraph = context.evaluated_depsgraph_get()
         # One pass per collection; the first selected instance of it maps the cursor.
         targets = {}
@@ -1800,14 +1824,9 @@ class ReplaceWithInstanceOperator(bpy.types.Operator):
     pivot: EnumProperty(
         name="Pivot",
         description="Where the instance origin (and the collection's instance offset) goes",
-        items=[
-            ('BOTTOM_CENTER', "Bottom Center", "Bottom center of the collection's bounds"),
-            ('CENTER', "Bounds Center", "Center of the collection's bounds"),
-            ('ACTIVE', "Active Object", "Origin of the active object"),
-            ('CURSOR', "3D Cursor", "Location of the 3D cursor"),
-            ('KEEP', "Instance Offset", "Keep the collection's current instance offset"),
-        ],
+        items=prefs_mod.REPLACE_PIVOT_ITEMS,
         default='BOTTOM_CENTER',
+        options={'SKIP_SAVE'},
     )
     top_level: BoolProperty(
         name="Top-Level Collection",
@@ -1816,7 +1835,10 @@ class ReplaceWithInstanceOperator(bpy.types.Operator):
             "collection) instead of the collection that directly holds it"
         ),
         default=False,
+        options={'SKIP_SAVE'},
     )
+
+    _PREF_DEFAULTS = {"pivot": "replace_pivot", "top_level": "replace_top_level"}
 
     @classmethod
     def poll(cls, context):
@@ -1836,6 +1858,7 @@ class ReplaceWithInstanceOperator(bpy.types.Operator):
         return current
 
     def execute(self, context):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         scene = context.scene
         objects = list(context.selected_objects)
         active = context.active_object
@@ -1949,6 +1972,7 @@ class UpdateCollectionStageOperator(bpy.types.Operator):
             "there with an instance in the same place, so it doesn't move. Off: skip it"
         ),
         default=True,
+        options={'SKIP_SAVE'},
     )
     spacing: bpy.props.FloatProperty(
         name="Spacing", description="Gap between collections", default=2.0, min=0.0,
@@ -1969,26 +1993,31 @@ class UpdateCollectionStageOperator(bpy.types.Operator):
     )
     sort: EnumProperty(
         name="Order",
-        items=[
-            ('NAME', "Name", "Alphabetical"),
-            ('SIZE', "Size", "Largest footprint first (tighter packing)"),
-        ],
+        items=prefs_mod.STAGE_SORT_ITEMS,
         default='NAME',
     )
     labels: BoolProperty(name="Labels", description="Name label in front of each collection", default=True)
     label_size: bpy.props.FloatProperty(
         name="Label Size", default=0.5, min=0.01, subtype='DISTANCE', unit='LENGTH',
     )
-    open_stage: BoolProperty(name="Open Stage", description="Switch to the stage scene afterwards", default=True)
+    open_stage: BoolProperty(
+        name="Open Stage", description="Switch to the stage scene afterwards", default=True,
+        options={'SKIP_SAVE'},
+    )
 
     _SETTING_NAMES = ("spacing", "snap", "row_width", "sort", "labels", "label_size")
+    _PREF_DEFAULTS = {
+        "instance_direct_uses": "stage_instance_direct_uses",
+        "open_stage": "stage_open_after_update",
+    }
 
     @classmethod
     def poll(cls, context):
         return context.mode == 'OBJECT'
 
     def invoke(self, context, event):
-        settings = fn.get_stage_settings(fn.get_stage_scene())
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
+        settings = fn.get_stage_settings(fn.get_stage_scene(), prefs_mod.stage_layout_defaults(context))
         for name in self._SETTING_NAMES:
             setattr(self, name, settings[name])
         return context.window_manager.invoke_props_dialog(self, width=360)
@@ -1999,7 +2028,7 @@ class UpdateCollectionStageOperator(bpy.types.Operator):
         layout.use_property_decorate = False
         stage = fn.get_stage_scene()
         if stage is None:
-            layout.label(text=f"Creates scene '{fn.STAGE_DEFAULT_NAME}'", icon='SCENE_DATA')
+            layout.label(text=f"Creates scene '{prefs_mod.stage_scene_name(context)}'", icon='SCENE_DATA')
         else:
             layout.label(text=f"{len(fn.get_stage_collections(stage))} collection(s) on '{stage.name}'", icon='SCENE_DATA')
         layout.prop(self, "relayout")
@@ -2016,6 +2045,7 @@ class UpdateCollectionStageOperator(bpy.types.Operator):
         layout.prop(self, "open_stage")
 
     def execute(self, context):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         settings = {name: getattr(self, name) for name in self._SETTING_NAMES}
         result = fn.update_collection_stage(
             context,
@@ -2023,6 +2053,7 @@ class UpdateCollectionStageOperator(bpy.types.Operator):
             relayout=self.relayout,
             instance_direct_uses=self.instance_direct_uses,
             settings=settings,
+            stage_name=prefs_mod.stage_scene_name(context),
         )
         if self.open_stage:
             _switch_to_stage(context, result["stage"])
@@ -2053,6 +2084,7 @@ class SendCollectionToStageOperator(bpy.types.Operator):
             "the scene collection) instead of the collection that directly holds it"
         ),
         default=False,
+        options={'SKIP_SAVE'},
     )
     anchor: EnumProperty(
         name="Anchor",
@@ -2060,14 +2092,16 @@ class SendCollectionToStageOperator(bpy.types.Operator):
             "Instance offset for collections nothing instances yet. Collections that are "
             "already instanced always keep theirs, so their instances don't move"
         ),
-        items=[
-            ('KEEP', "Keep", "Keep the current instance offset"),
-            ('BOTTOM_CENTER', "Bottom Center", "Bottom center of the collection's bounds"),
-            ('CENTER', "Bounds Center", "Center of the collection's bounds"),
-        ],
+        items=prefs_mod.STAGE_ANCHOR_ITEMS,
         default='KEEP',
+        options={'SKIP_SAVE'},
     )
-    open_stage: BoolProperty(name="Open Stage", description="Switch to the stage scene afterwards", default=False)
+    open_stage: BoolProperty(
+        name="Open Stage", description="Switch to the stage scene afterwards", default=False,
+        options={'SKIP_SAVE'},
+    )
+
+    _PREF_DEFAULTS = {"top_level": "send_top_level", "anchor": "send_anchor", "open_stage": "send_open_stage"}
 
     @classmethod
     def poll(cls, context):
@@ -2097,6 +2131,7 @@ class SendCollectionToStageOperator(bpy.types.Operator):
         return targets
 
     def execute(self, context):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
         targets = self._targets(context)
         if not targets:
             self.report({'WARNING'}, "Select objects in a collection, a collection instance, or an active collection")
@@ -2107,6 +2142,8 @@ class SendCollectionToStageOperator(bpy.types.Operator):
             context,
             targets=targets,
             anchor=self.anchor,
+            stage_name=prefs_mod.stage_scene_name(context),
+            default_settings=prefs_mod.stage_layout_defaults(context),
         )
         # Select the new instances that replaced the collections in this scene.
         new_instances = [

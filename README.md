@@ -39,10 +39,33 @@ blender --command extension build --source-dir custom_blender_utils --output-fil
 ## Usage
 
 - Utilities menu: 3D View → Header → Utilities
-- Utilities pie: press `V` in Object Mode to open “Utilities Pie”
+- Utilities pie: press `V` in Object Mode to open “Utilities Pie” (layout and hotkeys: see Preferences)
 - Collections menu: 3D View → Header → Collections
 - Collections pie: press `C` in Object Mode to open “Collections Pie”
   (circle select stays on `C` in other modes)
+
+### Preferences
+Edit → Preferences → Add-ons → Custom Utilities. Four tabs:
+
+- **Pie Menus**: both pies laid out as a 3×3 grid matching the pie. Pick any
+  addon action (or Empty) for each of the eight directions; the same action can
+  go in both pies. Per pie: hotkey (key, modifiers, on/off, restore, using
+  Blender's keymap editor, so changes save with your keymap), Icons on/off,
+  Reset (default layout) and Clear. A collapsible box shows Blender's own pie
+  settings (radius, thresholds, timeouts); those affect every pie in Blender.
+- **Interface**: show or hide the Utilities and Collections header menus, the
+  Copy Render Settings button in Render Properties, and Send to Stage in the
+  Outliner's collection menu.
+- **Tools**: the options tools start with: Measure (decimal places, copy to
+  clipboard), Geometry Nodes (paste excludes active, import attaches to active,
+  export folder), Copy Render Settings (include output).
+- **Collections**: the options collection tools start with (Decompose nested
+  instances, Replace with Instance pivot and top-level, Reset Anchor anchor) and
+  the Collection Stage: scene name, Update/Send options, and the layout a new
+  stage starts with (each stage then keeps its own layout).
+
+Tool options set here are where each run starts; the redo panel still changes
+them for that run. (Before 0.4.0 these options remembered the last run instead.)
 
 ### Collection Tools
 All of these work on collection instances (empties instancing a collection).

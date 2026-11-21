@@ -27,7 +27,13 @@ def measure_distance_from_camera_to_location(location: Vector) -> Optional[float
     cam_loc = cam.matrix_world.to_translation()
     return (cam_loc - location).length
 
-def handle_mouse_click(context: bpy.types.Context, event: bpy.types.Event, operator: bpy.types.Operator) -> None:
+def handle_mouse_click(
+    context: bpy.types.Context,
+    event: bpy.types.Event,
+    operator: bpy.types.Operator,
+    precision: int = 2,
+    copy_to_clipboard: bool = True,
+) -> None:
     """Handle a 3D view click by raycasting and reporting camera-to-hit distance."""
     x, y = event.mouse_region_x, event.mouse_region_y
     region = context.region
@@ -46,9 +52,11 @@ def handle_mouse_click(context: bpy.types.Context, event: bpy.types.Event, opera
     if result:
         distance = measure_distance_from_camera_to_location(location)
         if distance:
-            print(f"Distance: {distance:.2f}")
-            operator.report({'INFO'}, f"Distance: {distance:.2f}")
-            bpy.context.window_manager.clipboard = f"{distance:.2f}"
+            text = f"{distance:.{precision}f}"
+            print(f"Distance: {text}")
+            operator.report({'INFO'}, f"Distance: {text}" + (" (copied)" if copy_to_clipboard else ""))
+            if copy_to_clipboard:
+                context.window_manager.clipboard = text
     else:
         print("No surface point clicked")
 
@@ -681,10 +689,14 @@ def _sanitize_filename(name: str) -> str:
     return cleaned or "geometry_nodes_network"
 
 
-def get_default_geometry_nodes_export_filepath(node_group_name: str) -> str:
-    """Return a default JSON path for GN export based on the current blend path."""
+def get_default_geometry_nodes_export_filepath(node_group_name: str, directory: str = "") -> str:
+    """Return a default JSON path for GN export: in `directory` if given ('//' = relative
+    to the .blend), else next to the .blend file, else in the home folder."""
     blend_path = bpy.data.filepath
-    if blend_path:
+    directory = (directory or "").strip()
+    if directory and (blend_path or not directory.startswith("//")):
+        base_dir = bpy.path.abspath(directory)
+    elif blend_path:
         base_dir = os.path.dirname(blend_path)
     else:
         base_dir = os.path.expanduser("~")
@@ -2896,9 +2908,13 @@ def get_stage_scene() -> Optional[bpy.types.Scene]:
     return None
 
 
-def get_stage_settings(stage: Optional[bpy.types.Scene]) -> Dict[str, Any]:
-    """Layout settings stored on the stage (defaults for any missing value)."""
+def get_stage_settings(
+    stage: Optional[bpy.types.Scene], defaults: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """Layout settings stored on the stage (`defaults`, else built-in defaults, for any missing value)."""
     settings = dict(STAGE_DEFAULT_SETTINGS)
+    if defaults:
+        settings.update({key: value for key, value in defaults.items() if key in settings})
     stored = stage.get(STAGE_SETTINGS_KEY) if stage is not None else None
     if stored is not None:
         for key in settings:
@@ -3182,6 +3198,7 @@ def update_collection_stage(
     anchor: str = 'KEEP',
     settings: Optional[Dict[str, Any]] = None,
     stage_name: str = STAGE_DEFAULT_NAME,
+    default_settings: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Create or update the collection stage.
 
@@ -3196,13 +3213,15 @@ def update_collection_stage(
     scene by an instance in the same place; otherwise it is skipped. Collections nested
     in another stage collection ride along with it. `anchor` ('KEEP', 'BOTTOM_CENTER',
     'CENTER') sets the instance offset of targets that nothing instances yet.
+    `settings=None` uses the layout saved on the stage, or `default_settings` for a
+    new stage.
 
     Returns a report dict: stage, added, moved, instanced, skipped [(name, reason)],
     nested [(name, outer name)], absorbed, overlaps [(a, b)].
     """
     stage = _ensure_stage_scene(context, stage_name)
     if settings is None:
-        settings = get_stage_settings(stage)
+        settings = get_stage_settings(stage, default_settings)
     stage[STAGE_SETTINGS_KEY] = settings
     report: Dict[str, Any] = {
         "stage": stage, "added": [], "moved": 0, "instanced": [], "skipped": [],
