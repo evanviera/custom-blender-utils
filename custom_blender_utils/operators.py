@@ -1828,6 +1828,273 @@ class ReplaceWithInstanceOperator(bpy.types.Operator):
         return {'FINISHED'}
 
 
+def _stage_report(operator: bpy.types.Operator, result: dict, verb: str) -> None:
+    """Summarize an update_collection_stage result in one report line."""
+    added = result["added"]
+    message = f"{verb}: {len(added)} collection(s) added, {result['moved']} placed"
+    notes = []
+    if result["instanced"]:
+        scenes = sorted({scene for scene, _name in result["instanced"]})
+        notes.append(
+            f"replaced {len(result['instanced'])} direct use(s) with instances in {', '.join(scenes)}"
+        )
+    if result["nested"]:
+        notes.append("part of another stage collection: " + ", ".join(
+            f"{name} (in {outer})" for name, outer in result["nested"]
+        ))
+    if result["absorbed"]:
+        notes.append("now inside another stage collection: " + ", ".join(result["absorbed"]))
+    if result["skipped"]:
+        notes.append("skipped " + "; ".join(f"{name}: {reason}" for name, reason in result["skipped"]))
+    if result["overlaps"]:
+        notes.append(
+            "overlapping (run Update Stage with Relayout All): "
+            + ", ".join(f"{a} / {b}" for a, b in result["overlaps"])
+        )
+    if notes:
+        message += " (" + "; ".join(notes) + ")"
+    level = {'WARNING'} if result["skipped"] or result["overlaps"] else {'INFO'}
+    operator.report(level, message)
+
+
+def _switch_to_stage(context: bpy.types.Context, stage: bpy.types.Scene) -> None:
+    window = context.window
+    if window is None or window.scene == stage:
+        return
+    stage[fn.STAGE_RETURN_SCENE_KEY] = window.scene.name
+    window.scene = stage
+
+
+class UpdateCollectionStageOperator(bpy.types.Operator):
+    bl_idname = "scene.update_collection_stage"
+    bl_label = "Update Collection Stage"
+    bl_description = (
+        "Build or update the Collection Stage: a scene with every asset collection (instanced "
+        "or marked as asset) in its own spot, for editing. Collections move by shifting their "
+        "contents and instance offset together, so instances elsewhere stay put"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    relayout: BoolProperty(
+        name="Relayout All",
+        description=(
+            "Repack every collection on the stage. Off: collections already on the stage stay "
+            "where they are and new ones are added below them"
+        ),
+        default=False,
+    )
+    instance_direct_uses: BoolProperty(
+        name="Instance Direct Uses",
+        description=(
+            "Where a collection is shown directly (not instanced) in another scene, replace it "
+            "there with an instance in the same place, so it doesn't move. Off: skip it"
+        ),
+        default=True,
+    )
+    spacing: bpy.props.FloatProperty(
+        name="Spacing", description="Gap between collections", default=2.0, min=0.0,
+        subtype='DISTANCE', unit='LENGTH',
+    )
+    snap: bpy.props.FloatProperty(
+        name="Grid Snap",
+        description=(
+            "Move collections only by multiples of this step, so grid-aligned parts stay "
+            "aligned. 0 disables snapping"
+        ),
+        default=1.0, min=0.0, subtype='DISTANCE', unit='LENGTH',
+    )
+    row_width: bpy.props.FloatProperty(
+        name="Row Width",
+        description="Maximum width of a row of collections. 0 picks a roughly square layout",
+        default=0.0, min=0.0, subtype='DISTANCE', unit='LENGTH',
+    )
+    sort: EnumProperty(
+        name="Order",
+        items=[
+            ('NAME', "Name", "Alphabetical"),
+            ('SIZE', "Size", "Largest footprint first (tighter packing)"),
+        ],
+        default='NAME',
+    )
+    labels: BoolProperty(name="Labels", description="Name label in front of each collection", default=True)
+    label_size: bpy.props.FloatProperty(
+        name="Label Size", default=0.5, min=0.01, subtype='DISTANCE', unit='LENGTH',
+    )
+    open_stage: BoolProperty(name="Open Stage", description="Switch to the stage scene afterwards", default=True)
+
+    _SETTING_NAMES = ("spacing", "snap", "row_width", "sort", "labels", "label_size")
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def invoke(self, context, event):
+        settings = fn.get_stage_settings(fn.get_stage_scene())
+        for name in self._SETTING_NAMES:
+            setattr(self, name, settings[name])
+        return context.window_manager.invoke_props_dialog(self, width=360)
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        stage = fn.get_stage_scene()
+        if stage is None:
+            layout.label(text=f"Creates scene '{fn.STAGE_DEFAULT_NAME}'", icon='SCENE_DATA')
+        else:
+            layout.label(text=f"{len(fn.get_stage_collections(stage))} collection(s) on '{stage.name}'", icon='SCENE_DATA')
+        layout.prop(self, "relayout")
+        layout.prop(self, "instance_direct_uses")
+        col = layout.column(heading="Layout")
+        col.prop(self, "spacing")
+        col.prop(self, "snap")
+        col.prop(self, "row_width")
+        col.prop(self, "sort")
+        col.prop(self, "labels")
+        sub = col.column()
+        sub.active = self.labels
+        sub.prop(self, "label_size")
+        layout.prop(self, "open_stage")
+
+    def execute(self, context):
+        settings = {name: getattr(self, name) for name in self._SETTING_NAMES}
+        result = fn.update_collection_stage(
+            context,
+            targets=None,
+            relayout=self.relayout,
+            instance_direct_uses=self.instance_direct_uses,
+            settings=settings,
+        )
+        if self.open_stage:
+            _switch_to_stage(context, result["stage"])
+        _stage_report(self, result, f"Updated '{result['stage'].name}'")
+        return {'FINISHED'}
+
+
+class SendCollectionToStageOperator(bpy.types.Operator):
+    bl_idname = "object.send_collection_to_stage"
+    bl_label = "Send to Stage"
+    bl_description = (
+        "Put the collection(s) of the selection (or the active collection) in a free spot on "
+        "the Collection Stage. Where a collection is shown directly in a scene it is replaced "
+        "there by an instance in the same place"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    use_active_collection: BoolProperty(
+        name="Active Collection",
+        description="Send the active collection (Outliner) instead of the selection's collections",
+        default=False,
+        options={'SKIP_SAVE'},
+    )
+    top_level: BoolProperty(
+        name="Top-Level Collection",
+        description=(
+            "For selected objects, send the outermost collection containing each one (below "
+            "the scene collection) instead of the collection that directly holds it"
+        ),
+        default=False,
+    )
+    anchor: EnumProperty(
+        name="Anchor",
+        description=(
+            "Instance offset for collections nothing instances yet. Collections that are "
+            "already instanced always keep theirs, so their instances don't move"
+        ),
+        items=[
+            ('KEEP', "Keep", "Keep the current instance offset"),
+            ('BOTTOM_CENTER', "Bottom Center", "Bottom center of the collection's bounds"),
+            ('CENTER', "Bounds Center", "Center of the collection's bounds"),
+        ],
+        default='KEEP',
+    )
+    open_stage: BoolProperty(name="Open Stage", description="Switch to the stage scene afterwards", default=False)
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT'
+
+    def _targets(self, context):
+        targets = []
+        if not self.use_active_collection:
+            objects = list(context.selected_objects)
+            active = context.active_object
+            if active in objects:
+                objects.remove(active)
+                objects.insert(0, active)
+            for obj in objects:
+                coll = fn.get_instanced_collection(obj)
+                if coll is None:
+                    coll = fn.get_object_collection(obj)
+                    if coll is not None and self.top_level:
+                        coll = ReplaceWithInstanceOperator._top_level(coll, context.scene)
+                if coll is not None and not coll.get(fn.STAGE_LABELS_KEY) and coll not in targets:
+                    targets.append(coll)
+        if not targets:
+            layer_coll = context.view_layer.active_layer_collection
+            coll = layer_coll.collection if layer_coll is not None else None
+            if coll is not None and coll != context.scene.collection and not coll.get(fn.STAGE_LABELS_KEY):
+                targets.append(coll)
+        return targets
+
+    def execute(self, context):
+        targets = self._targets(context)
+        if not targets:
+            self.report({'WARNING'}, "Select objects in a collection, a collection instance, or an active collection")
+            return {'CANCELLED'}
+
+        scene = context.scene
+        result = fn.update_collection_stage(
+            context,
+            targets=targets,
+            anchor=self.anchor,
+        )
+        # Select the new instances that replaced the collections in this scene.
+        new_instances = [
+            obj for obj in scene.objects
+            if fn.get_instanced_collection(obj) in targets and obj.name in context.view_layer.objects
+        ]
+        replaced_here = {name for scene_name, name in result["instanced"] if scene_name == scene.name}
+        if replaced_here:
+            for obj in context.selected_objects:
+                obj.select_set(False)
+            for obj in new_instances:
+                if obj.instance_collection.name in replaced_here:
+                    obj.select_set(True)
+                    context.view_layer.objects.active = obj
+
+        if self.open_stage:
+            _switch_to_stage(context, result["stage"])
+        _stage_report(self, result, f"Sent to '{result['stage'].name}'")
+        return {'FINISHED'}
+
+
+class ToggleCollectionStageOperator(bpy.types.Operator):
+    bl_idname = "scene.toggle_collection_stage"
+    bl_label = "Go to Stage"
+    bl_description = "Switch to the Collection Stage scene, or back to the scene you came from"
+    bl_options = {"REGISTER"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.window is not None and fn.get_stage_scene() is not None
+
+    def execute(self, context):
+        stage = fn.get_stage_scene()
+        window = context.window
+        if window.scene != stage:
+            _switch_to_stage(context, stage)
+            return {'FINISHED'}
+        back = bpy.data.scenes.get(stage.get(fn.STAGE_RETURN_SCENE_KEY, ""))
+        if back is None or back == stage:
+            back = next((s for s in bpy.data.scenes if s != stage), None)
+        if back is None:
+            self.report({'WARNING'}, "No other scene to return to")
+            return {'CANCELLED'}
+        window.scene = back
+        return {'FINISHED'}
+
+
 classes = [
     CUSTOMUTILS_PG_gn_network_selection_item,
     CUSTOMUTILS_PG_gn_parameter_selection_item,
@@ -1855,6 +2122,9 @@ classes = [
     DuplicateCollectionOperator,
     ReplaceWithInstanceOperator,
     ResetCollectionAnchorOperator,
+    UpdateCollectionStageOperator,
+    SendCollectionToStageOperator,
+    ToggleCollectionStageOperator,
 ]
 
 def register():

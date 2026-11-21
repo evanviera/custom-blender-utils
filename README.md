@@ -9,6 +9,8 @@ A curated set of everyday operators for modeling and scene management:
 - Collection tools (own menu and pie): edit, duplicate, decompose and merge
   collection instances, replace a collection with an instance, reset a
   collection's anchor point, and move selected objects to any collection
+- Collection Stage: a dedicated scene with every asset collection laid out in its
+  own spot for editing, without moving any instance in any scene or file
 - Copy the current scene's Render Properties to all other scenes
 
 ## Install
@@ -80,6 +82,48 @@ Source collections are never modified; copies get their own object data
   compensated.
 - **Move Selected to Collection**: filter collections by name, pick the target,
   confirm.
+
+### Collection Stage
+A scene (“Collection Stage”) where every asset collection sits in its own spot,
+side by side on the ground, with a name label in front. Go there to tweak
+collections in place; every instance of them updates.
+
+How collections are placed: a collection's objects are shared by every scene
+that uses it, so a collection is put in its spot by moving its contents **and**
+its instance offset by the same amount. Instances draw relative to the instance
+offset, so instances in every scene, and in other files that link the
+collection, do not move.
+
+- **Build / Update Collection Stage** (Collections menu): creates the stage on
+  first run, then adds every asset collection not on it yet (collections that
+  are instanced anywhere or marked as assets). Collections already on the stage
+  stay where they are; new ones are added in rows below. Dialog options:
+  - Relayout All: repack every collection (e.g. after edits made them overlap;
+    overlaps are reported).
+  - Instance Direct Uses: where a collection is shown directly (not instanced)
+    in another scene, it is replaced there by an instance in the same place, as
+    with Replace with Instance, so it doesn't move. Off: such collections are
+    skipped.
+  - Layout: spacing, grid snap (collections only move by whole grid steps, so
+    modular parts stay grid-aligned), row width, order (name or size), labels.
+    These are saved with the stage and used by Send to Stage.
+- **Send to Stage** (Collections menu and pie, Outliner collection right-click):
+  puts the selection's collections (the collection of a selected instance, or
+  the collection holding a selected object) in a free spot. Run it on a
+  collection you just built: it moves to the stage and is replaced by an
+  instance where you built it. Collections already on the stage are moved to a
+  free spot. Redo panel: Top-Level Collection, Anchor (instance offset for
+  collections nothing instances yet; instanced ones always keep theirs), Open
+  Stage.
+- **Go to Stage / Back from Stage**: switch between the stage and the scene you
+  came from.
+
+Collections nested in a stage collection ride along with it. A collection is
+skipped (and reported) when its contents can't be moved as one block: an object
+also in a collection outside it, an object parented to one outside it, an
+animated location on a top-level object, a child collection shown on its own
+in another scene, or a library-linked collection. Edit Collection on an instance
+now shows the collection at its stage spot.
 
 ### Transformations Clipboard
 - Copy from selected: Utilities → “Copy Transformations”.

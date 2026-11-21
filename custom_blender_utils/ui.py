@@ -95,6 +95,22 @@ def _edit_collection_label(context) -> str:
     return "Close Collection" if is_editing else "Edit Collection"
 
 
+def _stage_scene():
+    for scene in bpy.data.scenes:
+        if scene.get("custom_utils_collection_stage"):
+            return scene
+    return None
+
+
+def _stage_update_label() -> str:
+    return "Update Collection Stage" if _stage_scene() is not None else "Build Collection Stage"
+
+
+def _stage_toggle_label(context) -> str:
+    stage = _stage_scene()
+    return "Back from Stage" if stage is not None and context.scene == stage else "Go to Stage"
+
+
 class CollectionsMenu(bpy.types.Menu):
     bl_label = "Collections"
     bl_idname = "VIEW3D_MT_custom_collections_menu"
@@ -111,6 +127,10 @@ class CollectionsMenu(bpy.types.Menu):
         layout.operator("object.reset_collection_anchor", text="Reset Collection Anchor", icon='PIVOT_BOUNDBOX')
         layout.separator()
         layout.operator("object.move_selected_to_collection", text="Move Selected to Collection", icon='FORWARD')
+        layout.separator()
+        layout.operator("scene.update_collection_stage", text=_stage_update_label(), icon='SCENE_DATA')
+        layout.operator("object.send_collection_to_stage", text="Send to Stage", icon='EXPORT')
+        layout.operator("scene.toggle_collection_stage", text=_stage_toggle_label(context), icon='FILE_REFRESH')
 
 
 class VIEW3D_MT_pie_collections(bpy.types.Menu):
@@ -128,6 +148,7 @@ class VIEW3D_MT_pie_collections(bpy.types.Menu):
         pie.operator("object.duplicate_instanced_collection", text="Duplicate Collection", icon='DUPLICATE')
         pie.operator("object.replace_collection_with_instance", text="Replace with Instance", icon='OUTLINER_OB_GROUP_INSTANCE')
         pie.operator("object.reset_collection_anchor", text="Reset Collection Anchor", icon='PIVOT_BOUNDBOX')
+        pie.operator("object.send_collection_to_stage", text="Send to Stage", icon='EXPORT')
 
 # Pie menu
 class VIEW3D_MT_pie_utilities(bpy.types.Menu):
@@ -157,6 +178,13 @@ def draw_func(self, context):
     layout = self.layout
     layout.menu("VIEW3D_MT_custom_menu")
     layout.menu("VIEW3D_MT_custom_collections_menu")
+
+# Outliner collection right-click menu: send the clicked (active) collection to the stage
+def draw_outliner_collection_func(self, context):
+    layout = self.layout
+    layout.separator()
+    op = layout.operator("object.send_collection_to_stage", text="Send to Stage", icon='EXPORT')
+    op.use_active_collection = True
 
 # Adds the copy button to the top of the Render Properties tab
 def draw_render_properties_func(self, context):
@@ -233,6 +261,11 @@ def register():
     except Exception:
         pass
     bpy.types.RENDER_PT_context.append(draw_render_properties_func)
+    try:
+        bpy.types.OUTLINER_MT_collection.remove(draw_outliner_collection_func)
+    except Exception:
+        pass
+    bpy.types.OUTLINER_MT_collection.append(draw_outliner_collection_func)
     _register_keymaps()
 
 
@@ -245,6 +278,10 @@ def unregister():
         pass
     try:
         bpy.types.RENDER_PT_context.remove(draw_render_properties_func)
+    except Exception:
+        pass
+    try:
+        bpy.types.OUTLINER_MT_collection.remove(draw_outliner_collection_func)
     except Exception:
         pass
     for cls in reversed(classes):

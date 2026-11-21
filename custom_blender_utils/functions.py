@@ -7,6 +7,7 @@ operations, and origin adjustments.
 """
 
 import json
+import math
 import os
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
@@ -2555,8 +2556,16 @@ def replace_collection_with_instance(
             if pivot != 'CENTER':
                 offset.z = lo.z
     coll.instance_offset = offset
+    return instance_collection_in_place(scene, coll), forced_keep
 
-    # Parent the instance next to the collection, preferring a parent inside this scene.
+
+def instance_collection_in_place(scene: bpy.types.Scene, coll: bpy.types.Collection) -> bpy.types.Object:
+    """Exclude `coll` in every view layer of `scene` and add an instance of it that draws
+    exactly where the collection was, keeping its instance offset.
+
+    The instance empty goes into the collection's parent in that scene (or the scene
+    collection) and sits at the instance offset.
+    """
     scene_tree = {scene.collection.as_pointer()}
     scene_tree.update(c.as_pointer() for c in scene.collection.children_recursive)
     parents = [p for p in get_collection_parents(coll) if p.as_pointer() in scene_tree]
@@ -2566,13 +2575,13 @@ def replace_collection_with_instance(
     instancer.instance_type = 'COLLECTION'
     instancer.instance_collection = coll
     instancer.empty_display_size = 0.5
-    instancer.location = offset  # instance draws at location - offset + source = source
+    instancer.location = Vector(coll.instance_offset)  # draws at location - offset + source = source
     target.objects.link(instancer)
 
     for view_layer in scene.view_layers:
         for layer_coll in _iter_layer_collections(view_layer.layer_collection, coll):
             layer_coll.exclude = True
-    return instancer, forced_keep
+    return instancer
 
 
 _TRANSFORM_PATHS = {
@@ -2652,3 +2661,501 @@ def set_collection_anchor(coll: bpy.types.Collection, anchor: Vector) -> Dict[st
         result["instances"] += 1
     coll.instance_offset = anchor
     return result
+
+
+# ---------------------------------------------------------------------------
+# Collection stage: a dedicated scene where every asset collection sits in its
+# own spot, so collections can be edited in place.
+#
+# A collection's objects are shared by every scene and file that uses it, so a
+# collection is put in its spot by moving its contents there and moving its
+# instance offset by the same amount. Instances anywhere (any scene, any file
+# linking the collection) draw at instancer @ T(-offset) @ contents, which does
+# not change, so nothing moves outside the stage.
+# ---------------------------------------------------------------------------
+
+STAGE_SCENE_KEY = "custom_utils_collection_stage"
+STAGE_SETTINGS_KEY = "custom_utils_stage_settings"
+STAGE_RETURN_SCENE_KEY = "custom_utils_stage_return_scene"
+STAGE_LABELS_KEY = "custom_utils_stage_labels"
+STAGE_LABEL_TARGET_KEY = "custom_utils_stage_label_for"
+STAGE_DEFAULT_NAME = "Collection Stage"
+
+STAGE_DEFAULT_SETTINGS: Dict[str, Any] = {
+    "spacing": 2.0,
+    "snap": 1.0,
+    "row_width": 0.0,
+    "sort": 'NAME',
+    "labels": True,
+    "label_size": 0.5,
+}
+
+_LOCATION_PATHS = {"location", "delta_location", "matrix_world", "matrix_basis"}
+_LABEL_CHAR_WIDTH = 0.6  # rough width of one label character, as a fraction of text size
+
+
+def get_stage_scene() -> Optional[bpy.types.Scene]:
+    """The file's collection stage scene, if it has one."""
+    for scene in bpy.data.scenes:
+        if scene.get(STAGE_SCENE_KEY):
+            return scene
+    return None
+
+
+def get_stage_settings(stage: Optional[bpy.types.Scene]) -> Dict[str, Any]:
+    """Layout settings stored on the stage (defaults for any missing value)."""
+    settings = dict(STAGE_DEFAULT_SETTINGS)
+    stored = stage.get(STAGE_SETTINGS_KEY) if stage is not None else None
+    if stored is not None:
+        for key in settings:
+            if key in stored:
+                settings[key] = stored[key]
+    return settings
+
+
+def _ensure_stage_scene(context: bpy.types.Context, name: str) -> bpy.types.Scene:
+    stage = get_stage_scene()
+    if stage is None:
+        stage = bpy.data.scenes.new(name or STAGE_DEFAULT_NAME)
+        stage[STAGE_SCENE_KEY] = True
+        if context.scene is not None:
+            stage.world = context.scene.world
+            stage.unit_settings.system = context.scene.unit_settings.system
+            stage.unit_settings.scale_length = context.scene.unit_settings.scale_length
+    return stage
+
+
+def _stage_labels_collection(stage: bpy.types.Scene, create: bool) -> Optional[bpy.types.Collection]:
+    for child in stage.collection.children:
+        if child.get(STAGE_LABELS_KEY):
+            return child
+    if not create:
+        return None
+    labels = bpy.data.collections.new("Stage Labels")
+    labels[STAGE_LABELS_KEY] = True
+    labels.hide_select = True
+    stage.collection.children.link(labels)
+    return labels
+
+
+def get_stage_collections(stage: Optional[bpy.types.Scene]) -> List[bpy.types.Collection]:
+    """Collections placed on the stage (direct children of its scene collection)."""
+    if stage is None:
+        return []
+    return [child for child in stage.collection.children if not child.get(STAGE_LABELS_KEY)]
+
+
+def find_stage_candidates() -> List[bpy.types.Collection]:
+    """Local collections used as assets: instanced by any object, or marked as an asset."""
+    instanced = {
+        obj.instance_collection.as_pointer()
+        for obj in bpy.data.objects
+        if get_instanced_collection(obj) is not None
+    }
+    return [
+        coll for coll in bpy.data.collections
+        if coll.library is None
+        and coll.override_library is None
+        and not coll.get(STAGE_LABELS_KEY)
+        and (coll.as_pointer() in instanced or coll.asset_data is not None)
+    ]
+
+
+def _has_animated_location(obj: bpy.types.Object) -> bool:
+    anim = obj.animation_data
+    if anim is None:
+        return False
+    paths = [driver.data_path for driver in anim.drivers]
+    action = anim.action
+    if action is not None:
+        fcurves = None
+        try:
+            from bpy_extras.anim_utils import action_get_channelbag_for_slot
+            channelbag = action_get_channelbag_for_slot(action, getattr(anim, "action_slot", None))
+            fcurves = channelbag.fcurves if channelbag is not None else None
+        except (ImportError, AttributeError, TypeError):
+            fcurves = getattr(action, "fcurves", None)
+        if fcurves is not None:
+            paths.extend(fc.data_path for fc in fcurves)
+    return any(path in _LOCATION_PATHS for path in paths)
+
+
+def _stage_move_problem(coll: bpy.types.Collection) -> Optional[str]:
+    """Why the collection's contents cannot be moved as one rigid block, or None."""
+    if coll.library is not None or coll.override_library is not None:
+        return "linked from a library"
+    tree_ptrs = {c.as_pointer() for c in _collection_tree(coll)}
+    objects = _collection_tree_objects(coll)
+    object_ptrs = {obj.as_pointer() for obj in objects}
+    for obj in objects:
+        if obj.library is not None:
+            return f"object '{obj.name}' is linked from a library"
+        outside = [c for c in obj.users_collection if c.as_pointer() not in tree_ptrs]
+        if outside:
+            return f"object '{obj.name}' is also in '{outside[0].name}'"
+        if obj.parent is not None and obj.parent.as_pointer() not in object_ptrs:
+            return f"object '{obj.name}' is parented to '{obj.parent.name}' outside the collection"
+        if obj.parent is None and _has_animated_location(obj):
+            return f"object '{obj.name}' has an animated location"
+    return None
+
+
+def _layer_tree_shows(layer_coll, coll: bpy.types.Collection, excluded: bool = False) -> bool:
+    """True when `coll` is linked somewhere under `layer_coll` and not excluded there."""
+    excluded = excluded or layer_coll.exclude
+    if layer_coll.collection == coll and not excluded:
+        return True
+    return any(_layer_tree_shows(child, coll, excluded) for child in layer_coll.children)
+
+
+def _layer_tree_shows_part(layer_coll, root: bpy.types.Collection, tree_ptrs: Set[int], excluded: bool = False) -> Optional[str]:
+    """Name of a collection in `root`'s tree that is shown without going through `root`."""
+    if layer_coll.collection == root:
+        return None
+    excluded = excluded or layer_coll.exclude
+    if not excluded and layer_coll.collection.as_pointer() in tree_ptrs:
+        return layer_coll.collection.name
+    for child in layer_coll.children:
+        found = _layer_tree_shows_part(child, root, tree_ptrs, excluded)
+        if found:
+            return found
+    return None
+
+
+def _scenes_showing(coll: bpy.types.Collection, skip: bpy.types.Scene) -> List[bpy.types.Scene]:
+    """Scenes other than `skip` where the collection is linked and visible (not excluded)."""
+    return [
+        scene for scene in bpy.data.scenes
+        if scene != skip
+        and any(_layer_tree_shows(vl.layer_collection, coll) for vl in scene.view_layers)
+    ]
+
+
+def _direct_use_problem(coll: bpy.types.Collection, stage: bpy.types.Scene) -> Optional[str]:
+    """A child collection shown on its own in another scene would move there; report it."""
+    tree_ptrs = {c.as_pointer() for c in _collection_tree(coll)} - {coll.as_pointer()}
+    if not tree_ptrs:
+        return None
+    for scene in bpy.data.scenes:
+        if scene == stage:
+            continue
+        for view_layer in scene.view_layers:
+            part = _layer_tree_shows_part(view_layer.layer_collection, coll, tree_ptrs)
+            if part:
+                return f"child collection '{part}' is shown on its own in scene '{scene.name}'"
+    return None
+
+
+def move_collection_contents(coll: bpy.types.Collection, delta: Vector) -> None:
+    """Translate everything in `coll`'s tree by `delta` and move every instance offset in
+    the tree by the same amount, so instances of these collections don't move.
+
+    Callers must check `_stage_move_problem` first: every top-level object of the tree is
+    then unparented, and moving its location moves it (and its children) by exactly delta.
+    """
+    for obj in _collection_tree_objects(coll):
+        if obj.parent is None:
+            obj.location = obj.location + delta
+    for child in _collection_tree(coll):
+        child.instance_offset = Vector(child.instance_offset) + delta
+
+
+def _snap_up(value: float, step: float) -> float:
+    return math.ceil(value / step - 1e-6) * step if step > 0 else value
+
+
+def _snap_down(value: float, step: float) -> float:
+    return math.floor(value / step + 1e-6) * step if step > 0 else value
+
+
+def _label_width(coll: bpy.types.Collection, settings: Dict[str, Any]) -> float:
+    if not settings["labels"]:
+        return 0.0
+    return len(coll.name) * settings["label_size"] * _LABEL_CHAR_WIDTH
+
+
+def _label_space(settings: Dict[str, Any]) -> float:
+    """Depth kept free in front of each item for its label."""
+    if not settings["labels"]:
+        return 0.0
+    return settings["label_size"] * 1.5
+
+
+def _pack_stage_items(
+    items: List[Tuple[bpy.types.Collection, Vector, Vector]],
+    origin_x: float,
+    top_y: float,
+    settings: Dict[str, Any],
+    row_width: float,
+) -> Dict[int, Vector]:
+    """Shelf-pack items in rows along +X, rows stepping toward -Y, all resting on Z=0.
+
+    Offsets are snapped to the grid step without letting items get closer than the
+    spacing: X/Z round away from the previous item/the ground, Y toward the row's front.
+    Returns {collection pointer: delta}.
+    """
+    spacing = settings["spacing"]
+    snap = settings["snap"]
+    label_space = _label_space(settings)
+    deltas: Dict[int, Vector] = {}
+    cursor_x = origin_x
+    row_top = top_y
+    row_bottom = top_y
+    row_has_items = False
+    for coll, lo, hi in items:
+        width = max(hi.x - lo.x, _label_width(coll, settings))
+        if row_has_items and cursor_x + width - origin_x > row_width:
+            row_top = row_bottom - label_space - spacing
+            row_bottom = row_top
+            cursor_x = origin_x
+            row_has_items = False
+        delta = Vector((
+            _snap_up(cursor_x - lo.x, snap),
+            _snap_down(row_top - hi.y, snap),
+            _snap_up(-lo.z, snap),
+        ))
+        deltas[coll.as_pointer()] = delta
+        cursor_x = lo.x + delta.x + width + spacing
+        row_bottom = min(row_bottom, lo.y + delta.y)
+        row_has_items = True
+    return deltas
+
+
+def _footprint(coll: bpy.types.Collection, lo: Vector, hi: Vector, settings: Dict[str, Any]) -> Tuple[float, float, float, float]:
+    """(min x, min y, max x, max y) an item occupies on the stage, label included."""
+    return (
+        lo.x,
+        lo.y - _label_space(settings),
+        max(hi.x, lo.x + _label_width(coll, settings)),
+        hi.y,
+    )
+
+
+def _rebuild_stage_labels(
+    stage: bpy.types.Scene,
+    placed: List[Tuple[bpy.types.Collection, Vector, Vector]],
+    settings: Dict[str, Any],
+) -> None:
+    labels = _stage_labels_collection(stage, create=settings["labels"])
+    if labels is not None:
+        for obj in list(labels.objects):
+            data = obj.data
+            bpy.data.objects.remove(obj)
+            if data is not None and data.users == 0:
+                bpy.data.curves.remove(data)
+    if not settings["labels"]:
+        if labels is not None:
+            bpy.data.collections.remove(labels)
+        return
+    size = settings["label_size"]
+    for coll, lo, _hi in placed:
+        curve = bpy.data.curves.new(f"Label {coll.name}", 'FONT')
+        curve.body = coll.name
+        curve.size = size
+        curve.align_x = 'LEFT'
+        label = bpy.data.objects.new(f"Label {coll.name}", curve)
+        label[STAGE_LABEL_TARGET_KEY] = coll.name
+        label.location = (lo.x, lo.y - size * 1.1, 0.0)
+        label.hide_select = True
+        labels.objects.link(label)
+
+
+def _bounds_or_offset(coll: bpy.types.Collection, depsgraph: bpy.types.Depsgraph) -> Tuple[Vector, Vector]:
+    bounds = _collection_world_bounds(coll, depsgraph)
+    if bounds is None:
+        offset = Vector(coll.instance_offset)
+        return offset.copy(), offset.copy()
+    return bounds
+
+
+def _outermost(collections: List[bpy.types.Collection]) -> Tuple[List[bpy.types.Collection], Dict[int, bpy.types.Collection]]:
+    """Split collections into those not nested in another one of them, and
+    {nested collection pointer: the outer collection that contains it}."""
+    containing: Dict[int, bpy.types.Collection] = {}
+    for outer in collections:
+        for child in outer.children_recursive:
+            containing.setdefault(child.as_pointer(), outer)
+    top = [coll for coll in collections if coll.as_pointer() not in containing]
+    nested = {coll.as_pointer(): containing[coll.as_pointer()] for coll in collections if coll.as_pointer() in containing}
+    return top, nested
+
+
+def update_collection_stage(
+    context: bpy.types.Context,
+    targets: Optional[List[bpy.types.Collection]] = None,
+    relayout: bool = False,
+    instance_direct_uses: bool = True,
+    anchor: str = 'KEEP',
+    settings: Optional[Dict[str, Any]] = None,
+    stage_name: str = STAGE_DEFAULT_NAME,
+) -> Dict[str, Any]:
+    """Create or update the collection stage.
+
+    targets=None adds every asset collection not yet on the stage (see
+    `find_stage_candidates`); a list sends exactly those collections, placing them in
+    free space even if they are already on the stage. Collections already on the stage
+    stay where they are unless `relayout` repacks them all.
+
+    A collection is placed by moving its contents and instance offset together (see
+    `move_collection_contents`). Where it is shown directly (not instanced) in another
+    scene, it would move there, so with `instance_direct_uses` it is replaced in that
+    scene by an instance in the same place; otherwise it is skipped. Collections nested
+    in another stage collection ride along with it. `anchor` ('KEEP', 'BOTTOM_CENTER',
+    'CENTER') sets the instance offset of targets that nothing instances yet.
+
+    Returns a report dict: stage, added, moved, instanced, skipped [(name, reason)],
+    nested [(name, outer name)], absorbed, overlaps [(a, b)].
+    """
+    stage = _ensure_stage_scene(context, stage_name)
+    if settings is None:
+        settings = get_stage_settings(stage)
+    stage[STAGE_SETTINGS_KEY] = settings
+    report: Dict[str, Any] = {
+        "stage": stage, "added": [], "moved": 0, "instanced": [], "skipped": [],
+        "nested": [], "absorbed": [], "overlaps": [],
+    }
+
+    existing = get_stage_collections(stage)
+    if targets is None:
+        existing_ptrs = {coll.as_pointer() for coll in existing}
+        new = [coll for coll in find_stage_candidates() if coll.as_pointer() not in existing_ptrs]
+    else:
+        new = []
+        for coll in targets:
+            if coll is not None and coll not in new:
+                new.append(coll)
+        new_ptrs = {coll.as_pointer() for coll in new}
+        existing = [coll for coll in existing if coll.as_pointer() not in new_ptrs]
+    new_ptrs = {coll.as_pointer() for coll in new}
+
+    top, nested = _outermost(existing + new)
+    for coll in existing + new:
+        outer = nested.get(coll.as_pointer())
+        # Only worth reporting for collections the user asked to send; found asset
+        # collections nested in a stage collection simply ride along with it.
+        if outer is not None and targets is not None and coll.as_pointer() in new_ptrs:
+            report["nested"].append((coll.name, outer.name))
+
+    # Two stage items sharing a child collection can't be placed apart.
+    owners: Dict[int, List[bpy.types.Collection]] = {}
+    for coll in top:
+        for part in _collection_tree(coll):
+            owners.setdefault(part.as_pointer(), []).append(coll)
+    shared: Dict[int, str] = {}
+    for part_ptr, colls in owners.items():
+        if len(colls) > 1:
+            for coll in colls:
+                other = next(c for c in colls if c != coll)
+                shared.setdefault(coll.as_pointer(), f"shares a child collection with '{other.name}'")
+
+    movable: List[bpy.types.Collection] = []
+    fixed: List[bpy.types.Collection] = []
+    for coll in top:
+        is_new = coll.as_pointer() in new_ptrs
+        if not is_new and not relayout:
+            fixed.append(coll)
+            continue
+        problem = (
+            shared.get(coll.as_pointer())
+            or _stage_move_problem(coll)
+            or _direct_use_problem(coll, stage)
+        )
+        if problem is None and not instance_direct_uses:
+            scenes = _scenes_showing(coll, stage)
+            if scenes:
+                problem = f"shown directly in scene '{scenes[0].name}'"
+        if problem is not None:
+            report["skipped"].append((coll.name, problem))
+            if not is_new:
+                fixed.append(coll)
+            continue
+        movable.append(coll)
+
+    # A stage collection nested in a skipped one stays on the stage as it is.
+    for coll in existing:
+        if coll.as_pointer() in nested and not any(
+            coll in outer.children_recursive for outer in fixed + movable
+        ):
+            fixed.append(coll)
+
+    # Link before measuring so the stage depsgraph evaluates everything (modifiers included).
+    for coll in movable:
+        if not any(child == coll for child in stage.collection.children):
+            stage.collection.children.link(coll)
+            report["added"].append(coll.name)
+    stage.view_layers[0].update()
+    depsgraph = stage.view_layers[0].depsgraph
+    bounds = {coll.as_pointer(): _bounds_or_offset(coll, depsgraph) for coll in fixed + movable}
+
+    if anchor != 'KEEP' and targets is not None:
+        for coll in movable:
+            if coll.as_pointer() in new_ptrs and not get_collection_instancers(coll):
+                lo, hi = bounds[coll.as_pointer()]
+                point = (lo + hi) * 0.5
+                if anchor == 'BOTTOM_CENTER':
+                    point.z = lo.z
+                coll.instance_offset = point
+
+    # Instance direct uses before moving: the instance sits at the old offset, and the
+    # move shifts contents and offset together, so it keeps drawing in place.
+    for coll in movable:
+        for scene in _scenes_showing(coll, stage):
+            instance_collection_in_place(scene, coll)
+            report["instanced"].append((scene.name, coll.name))
+
+    if settings["sort"] == 'SIZE':
+        def _area(coll):
+            lo, hi = bounds[coll.as_pointer()]
+            return -(hi.x - lo.x) * (hi.y - lo.y)
+        movable.sort(key=lambda c: (_area(c), c.name.lower()))
+    else:
+        movable.sort(key=lambda c: c.name.lower())
+
+    spacing = settings["spacing"]
+    footprints = [_footprint(c, *bounds[c.as_pointer()], settings) for c in fixed]
+    if footprints:
+        origin_x = min(fp[0] for fp in footprints)
+        top_y = min(fp[1] for fp in footprints) - spacing
+    else:
+        origin_x, top_y = 0.0, 0.0
+    row_width = settings["row_width"]
+    if row_width <= 0.0:
+        area, widest = 0.0, 0.0
+        for coll in fixed + movable:
+            lo, hi = bounds[coll.as_pointer()]
+            width = max(hi.x - lo.x, _label_width(coll, settings)) + spacing
+            area += width * (hi.y - lo.y + _label_space(settings) + spacing)
+            widest = max(widest, width)
+        row_width = max(math.sqrt(area), widest)
+        if footprints:
+            row_width = max(row_width, max(fp[2] for fp in footprints) - origin_x)
+
+    deltas = _pack_stage_items(
+        [(c, *bounds[c.as_pointer()]) for c in movable], origin_x, top_y, settings, row_width
+    )
+    for coll in movable:
+        delta = deltas[coll.as_pointer()]
+        if delta.length > 0.0:
+            move_collection_contents(coll, delta)
+            report["moved"] += 1
+        lo, hi = bounds[coll.as_pointer()]
+        bounds[coll.as_pointer()] = (lo + delta, hi + delta)
+
+    # Stage collections now nested inside a placed one are part of it.
+    placed_ptrs = {coll.as_pointer() for coll in fixed + movable}
+    for coll in get_stage_collections(stage):
+        if coll.as_pointer() not in placed_ptrs and coll.as_pointer() in nested:
+            outer = nested[coll.as_pointer()]
+            if outer.as_pointer() in placed_ptrs:
+                stage.collection.children.unlink(coll)
+                report["absorbed"].append(coll.name)
+
+    placed = [(c, *bounds[c.as_pointer()]) for c in fixed + movable]
+    _rebuild_stage_labels(stage, placed, settings)
+
+    boxes = [(c.name, _footprint(c, lo, hi, settings)) for c, lo, hi in placed]
+    for i, (name_a, a) in enumerate(boxes):
+        for name_b, b in boxes[i + 1:]:
+            if a[0] < b[2] - 1e-4 and b[0] < a[2] - 1e-4 and a[1] < b[3] - 1e-4 and b[1] < a[3] - 1e-4:
+                report["overlaps"].append((name_a, name_b))
+    return report
