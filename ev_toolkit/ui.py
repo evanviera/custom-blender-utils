@@ -1,4 +1,4 @@
-"""UI menus for the Custom Utilities Blender addon.
+"""UI menus for the EV Toolkit Blender addon.
 
 Pie layouts, hotkeys and which menus appear are configured in the addon
 preferences (see preferences.py); actions come from catalog.py.
@@ -59,7 +59,7 @@ def _draw_menu(layout, context, keys):
 class UtilitiesMenu(bpy.types.Menu):
     bl_label = "Utilities"
     bl_idname = "VIEW3D_MT_custom_menu"
-    bl_description = "Custom Utilities quick actions"
+    bl_description = "EV Toolkit quick actions"
 
     def draw(self, context):
         _draw_menu(self.layout, context, UTILITIES_MENU)
@@ -68,7 +68,7 @@ class UtilitiesMenu(bpy.types.Menu):
 class CollectionsMenu(bpy.types.Menu):
     bl_label = "Collections"
     bl_idname = "VIEW3D_MT_custom_collections_menu"
-    bl_description = "Custom Utilities collection tools"
+    bl_description = "EV Toolkit collection tools"
 
     def draw(self, context):
         _draw_menu(self.layout, context, COLLECTIONS_MENU)
@@ -82,22 +82,20 @@ def _draw_pie(layout, context, pie_id):
             pie.separator()
 
 
-class VIEW3D_MT_pie_utilities(bpy.types.Menu):
-    bl_label = "Utilities Pie"
-    bl_idname = "VIEW3D_MT_pie_utilities"
-    bl_description = "Custom Utilities pie menu"
-
+def _make_pie_menu(spec: prefs_mod.PieSpec) -> type:
+    """A Menu class drawing one pie from preferences.PIES."""
     def draw(self, context):
-        _draw_pie(self.layout, context, "utilities")
+        _draw_pie(self.layout, context, spec.id)
+
+    return type(spec.menu, (bpy.types.Menu,), {
+        "bl_idname": spec.menu,
+        "bl_label": spec.title,
+        "bl_description": f"{spec.title} (layout and hotkey in the addon preferences)",
+        "draw": draw,
+    })
 
 
-class VIEW3D_MT_pie_collections(bpy.types.Menu):
-    bl_label = "Collections Pie"
-    bl_idname = "VIEW3D_MT_pie_collections"
-    bl_description = "Custom Utilities collection pie menu"
-
-    def draw(self, context):
-        _draw_pie(self.layout, context, "collections")
+PIE_MENUS = tuple(_make_pie_menu(spec) for spec in prefs_mod.PIES)
 
 
 # 3D View header menus
@@ -130,8 +128,7 @@ def draw_render_properties_func(self, context):
 classes = (
     UtilitiesMenu,
     CollectionsMenu,
-    VIEW3D_MT_pie_utilities,
-    VIEW3D_MT_pie_collections,
+    *PIE_MENUS,
 )
 
 _MENU_APPENDS = (

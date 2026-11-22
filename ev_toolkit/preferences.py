@@ -1,7 +1,7 @@
-"""Add-on preferences for Custom Utilities.
+"""Add-on preferences for EV Toolkit.
 
 Four tabs:
-- Pie Menus: what goes in each of the eight directions of both pies, their hotkeys,
+- Pie Menus: what goes in each of the eight directions of every pie, their hotkeys,
   icons, and Blender's own (global) pie behavior.
 - Interface: which menus and buttons the addon adds to Blender's UI.
 - Tools: the options tools start with (Measure, Geometry Nodes, Render).
@@ -13,7 +13,7 @@ the preference by `apply_operator_defaults` when the tool starts, unless the cal
 set it explicitly. The redo panel still changes it for that one run.
 """
 
-from typing import Dict, NamedTuple
+from typing import Dict, NamedTuple, Tuple
 
 import bpy
 import rna_keymap_ui
@@ -74,16 +74,27 @@ PIE_GRID = (
 )
 
 
+# Keymaps a pie hotkey can live in. Mode keymaps are checked before "3D View", so a
+# pie that replaces a built-in key (G, R, S) must go in the mode keymaps holding it.
+KEYMAP_LABELS = {
+    "Object Mode": "Object Mode",
+    "Mesh": "Edit Mode (Mesh)",
+}
+
+
 class PieSpec(NamedTuple):
     id: str
     menu: str  # Menu bl_idname
     title: str
     key: str  # default hotkey
     icons: bool  # default for "Show Icons"
-    slots: Dict[str, str]  # default action key per direction
+    slots: Dict[str, str]  # default action key per direction; missing directions are empty
+    keymaps: Tuple[str, ...] = ("Object Mode",)  # one hotkey per keymap (mode)
 
 
-PIE_KEYMAP_NAME = "Object Mode"
+def _transform_slots(prefix: str) -> Dict[str, str]:
+    return {"west": f"{prefix}_X", "east": f"{prefix}_Y", "south": f"{prefix}_Z", "north": prefix}
+
 
 PIES = (
     PieSpec(
@@ -112,6 +123,32 @@ PIES = (
             "south_east": "STAGE_SEND",
         },
     ),
+    PieSpec(
+        "select_linked", "VIEW3D_MT_pie_select_linked", "Select Linked Pie", 'D', False,
+        {
+            "west": "SELECT_LINKED_MATERIAL",
+            "east": "SELECT_LINKED_DATA",
+            "south": "SELECT_CHILDREN",
+            "north": "SELECT_SAME_TYPE",
+            "north_west": "SELECT_SAME_COLOR",
+            "north_east": "SELECT_ACTIVE_CAMERA",
+            "south_west": "SELECT_SAME_LIGHT_TYPE",
+            "south_east": "SELECT_LINKED_INSTANCE",
+        },
+    ),
+    PieSpec(
+        "select_loops", "VIEW3D_MT_pie_select_loops", "Select Loops Pie", 'D', False,
+        {
+            "west": "SELECT_EDGE_LOOPS",
+            "east": "SELECT_EDGE_RINGS",
+            "south": "SELECT_LESS",
+            "north": "SELECT_MORE",
+        },
+        keymaps=("Mesh",),
+    ),
+    PieSpec("move", "VIEW3D_MT_pie_move", "Move Pie", 'G', False, _transform_slots("MOVE"), ("Object Mode", "Mesh")),
+    PieSpec("rotate", "VIEW3D_MT_pie_rotate", "Rotate Pie", 'R', False, _transform_slots("ROTATE"), ("Object Mode", "Mesh")),
+    PieSpec("scale", "VIEW3D_MT_pie_scale", "Scale Pie", 'S', False, _transform_slots("SCALE"), ("Object Mode", "Mesh")),
 )
 
 PIES_BY_ID = {spec.id: spec for spec in PIES}
@@ -125,12 +162,20 @@ def pie_icons_prop(pie_id: str) -> str:
     return f"{pie_id}_pie_icons"
 
 
+def pie_expanded_prop(pie_id: str) -> str:
+    return f"{pie_id}_pie_expanded"
+
+
+def pie_default_slot(spec: PieSpec, direction: str) -> str:
+    return spec.slots.get(direction, catalog.NONE_KEY)
+
+
 def pie_slot_actions(context: bpy.types.Context, pie_id: str):
     """(direction, action key) for every slot of a pie, in Blender's fill order."""
     prefs = get_prefs(context)
     spec = PIES_BY_ID[pie_id]
     for direction in PIE_DIRECTIONS:
-        key = getattr(prefs, pie_slot_prop(pie_id, direction)) if prefs else spec.slots[direction]
+        key = getattr(prefs, pie_slot_prop(pie_id, direction)) if prefs else pie_default_slot(spec, direction)
         yield direction, key
 
 
@@ -200,28 +245,28 @@ def stage_scene_name(context: bpy.types.Context) -> str:
 addon_keymaps = []
 
 
+def _find_pie_item(km: bpy.types.KeyMap, menu: str):
+    for kmi in km.keymap_items:
+        if kmi.idname == "wm.call_menu_pie" and getattr(kmi.properties, "name", "") == menu:
+            return kmi
+    return None
+
+
 def register_keymaps():
     wm = bpy.context.window_manager
     kc = wm.keyconfigs.addon
     if not kc:
         return
-    km = kc.keymaps.get(PIE_KEYMAP_NAME)
-    if km is None:
-        km = kc.keymaps.new(name=PIE_KEYMAP_NAME, space_type='EMPTY')
     for spec in PIES:
-        existing = next(
-            (
-                kmi for kmi in km.keymap_items
-                if kmi.idname == "wm.call_menu_pie" and getattr(kmi.properties, "name", "") == spec.menu
-            ),
-            None,
-        )
-        if existing is not None:
-            addon_keymaps.append((km, existing))
-            continue
-        kmi = km.keymap_items.new("wm.call_menu_pie", type=spec.key, value='PRESS')
-        kmi.properties.name = spec.menu
-        addon_keymaps.append((km, kmi))
+        for keymap_name in spec.keymaps:
+            km = kc.keymaps.get(keymap_name)
+            if km is None:
+                km = kc.keymaps.new(name=keymap_name, space_type='EMPTY')
+            kmi = _find_pie_item(km, spec.menu)
+            if kmi is None:
+                kmi = km.keymap_items.new("wm.call_menu_pie", type=spec.key, value='PRESS')
+                kmi.properties.name = spec.menu
+            addon_keymaps.append((km, kmi))
 
 
 def unregister_keymaps():
@@ -233,16 +278,13 @@ def unregister_keymaps():
     addon_keymaps.clear()
 
 
-def _find_user_keymap_item(context: bpy.types.Context, menu: str):
+def _find_user_keymap_item(context: bpy.types.Context, keymap_name: str, menu: str):
     """The user-keyconfig copy of a pie hotkey (the one users edit), as (keyconfig, keymap, item)."""
     kc = context.window_manager.keyconfigs.user
-    km = kc.keymaps.get(PIE_KEYMAP_NAME) if kc else None
+    km = kc.keymaps.get(keymap_name) if kc else None
     if km is None:
         return kc, None, None
-    for kmi in km.keymap_items:
-        if kmi.idname == "wm.call_menu_pie" and getattr(kmi.properties, "name", "") == menu:
-            return kc, km, kmi
-    return kc, km, None
+    return kc, km, _find_pie_item(km, menu)
 
 
 # --- Operators used by the preferences UI ---
@@ -267,7 +309,7 @@ class CUSTOMUTILS_OT_reset_pie_layout(bpy.types.Operator):
         if prefs is None or spec is None:
             return {'CANCELLED'}
         for direction in PIE_DIRECTIONS:
-            value = catalog.NONE_KEY if self.clear else spec.slots[direction]
+            value = catalog.NONE_KEY if self.clear else pie_default_slot(spec, direction)
             setattr(prefs, pie_slot_prop(spec.id, direction), value)
         context.preferences.is_dirty = True
         return {'FINISHED'}
@@ -275,7 +317,7 @@ class CUSTOMUTILS_OT_reset_pie_layout(bpy.types.Operator):
 
 # --- Preferences ---
 
-class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
+class EVToolkitPreferences(bpy.types.AddonPreferences):
     bl_idname = ADDON_ID
 
     tab: EnumProperty(
@@ -456,8 +498,16 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
         return col
 
     def _draw_pies(self, context, layout):
+        # Group the pies by the modes their hotkeys work in, in PIES order.
+        sections = {}
         for spec in PIES:
-            self._draw_pie(context, layout, spec)
+            sections.setdefault(spec.keymaps, []).append(spec)
+        for keymaps, specs in sections.items():
+            layout.label(text=" & ".join(KEYMAP_LABELS.get(name, name) for name in keymaps))
+            col = layout.column(align=True)
+            for spec in specs:
+                self._draw_pie(context, col, spec)
+            layout.separator()
 
         box = layout.box()
         row = box.row()
@@ -482,25 +532,46 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
 
     def _draw_pie(self, context, layout, spec: PieSpec):
         box = layout.box()
-        kc, km, kmi = _find_user_keymap_item(context, spec.menu)
+        hotkeys = [(name, *_find_user_keymap_item(context, name, spec.menu)) for name in spec.keymaps]
+        active_keys = [kmi.to_string() for _name, _kc, _km, kmi in hotkeys if kmi is not None and kmi.active]
 
+        # Header (always shown): expand toggle, title, hotkey on/off per mode, current key.
+        expanded_prop = pie_expanded_prop(spec.id)
+        expanded = getattr(self, expanded_prop)
         header = box.row()
-        header.label(text=spec.title, icon='MENU_PANEL')
-        header.prop(self, pie_icons_prop(spec.id), text="Icons", toggle=True, icon='IMAGE_RGB_ALPHA')
+        header.prop(
+            self, expanded_prop, text=spec.title, emboss=False,
+            icon='DISCLOSURE_TRI_DOWN' if expanded else 'DISCLOSURE_TRI_RIGHT',
+        )
         sub = header.row(align=True)
+        sub.alignment = 'RIGHT'
+        for name, _kc, _km, kmi in hotkeys:
+            if kmi is not None:
+                text = KEYMAP_LABELS.get(name, name) if len(hotkeys) > 1 else ""
+                sub.prop(kmi, "active", text=text)
+        sub.label(text=" / ".join(dict.fromkeys(active_keys)) or "Off", icon='KEYINGSET')
+        if not expanded:
+            return
+
+        row = box.row()
+        row.prop(self, pie_icons_prop(spec.id), text="Icons", toggle=True, icon='IMAGE_RGB_ALPHA')
+        sub = row.row(align=True)
         op = sub.operator(CUSTOMUTILS_OT_reset_pie_layout.bl_idname, text="Reset", icon='LOOP_BACK')
         op.pie = spec.id
         op = sub.operator(CUSTOMUTILS_OT_reset_pie_layout.bl_idname, text="Clear", icon='X')
         op.pie = spec.id
         op.clear = True
 
-        # Hotkey: the standard keymap row (enable, key, modifiers, restore).
-        hotkey = box.column()
-        if kmi is not None:
-            hotkey.context_pointer_set("keymap", km)
-            rna_keymap_ui.draw_kmi([], kc, km, kmi, hotkey, 0)
-        else:
-            hotkey.label(text="Hotkey not found; disable and re-enable the addon to restore it", icon='ERROR')
+        # Hotkeys: the standard keymap row (enable, key, modifiers, restore), one per mode.
+        for name, kc, km, kmi in hotkeys:
+            hotkey = box.column()
+            if len(hotkeys) > 1:
+                hotkey.label(text=KEYMAP_LABELS.get(name, name))
+            if kmi is not None:
+                hotkey.context_pointer_set("keymap", km)
+                rna_keymap_ui.draw_kmi([], kc, km, kmi, hotkey, 0)
+            else:
+                hotkey.label(text="Hotkey not found; disable and re-enable the addon to restore it", icon='ERROR')
 
         # Slots, laid out like the pie itself.
         grid = box.grid_flow(row_major=True, columns=3, even_columns=True, even_rows=True, align=True)
@@ -509,8 +580,7 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
                 if direction is None:
                     cell = grid.row()
                     cell.alignment = 'CENTER'
-                    key_text = kmi.to_string() if kmi is not None and kmi.active else "No hotkey"
-                    cell.label(text=key_text, icon='KEYINGSET')
+                    cell.label(text=" / ".join(dict.fromkeys(active_keys)) or "No hotkey", icon='KEYINGSET')
                     continue
                 cell = grid.column(align=True)
                 cell.label(text=PIE_DIRECTION_LABELS[direction])
@@ -582,7 +652,7 @@ class CustomUtilitiesPreferences(bpy.types.AddonPreferences):
 
 
 def _add_pie_properties():
-    annotations = CustomUtilitiesPreferences.__annotations__
+    annotations = EVToolkitPreferences.__annotations__
     items = catalog.action_enum_items()
     for spec in PIES:
         for direction in PIE_DIRECTIONS:
@@ -590,12 +660,17 @@ def _add_pie_properties():
                 name=f"{spec.title}: {PIE_DIRECTION_LABELS[direction]}",
                 description=f"Action in the {PIE_DIRECTION_LABELS[direction].lower()} direction of the {spec.title}",
                 items=items,
-                default=spec.slots[direction],
+                default=pie_default_slot(spec, direction),
             )
         annotations[pie_icons_prop(spec.id)] = BoolProperty(
             name="Show Icons",
             description=f"Show icons in the {spec.title}",
             default=spec.icons,
+        )
+        annotations[pie_expanded_prop(spec.id)] = BoolProperty(
+            name="Expanded",
+            description=f"Show the layout and hotkey settings of the {spec.title}",
+            default=False,
         )
 
 
@@ -604,7 +679,7 @@ _add_pie_properties()
 
 classes = (
     CUSTOMUTILS_OT_reset_pie_layout,
-    CustomUtilitiesPreferences,
+    EVToolkitPreferences,
 )
 
 

@@ -7,7 +7,7 @@ a fixed number: never renumber or reuse one, or saved pie layouts would point at
 the wrong action. Add new actions with a new, unused number.
 """
 
-from typing import Callable, Dict, NamedTuple, Optional, Tuple
+from typing import Any, Callable, Dict, NamedTuple, Optional, Tuple
 
 import bpy
 
@@ -33,14 +33,41 @@ def _stage_toggle_label(context: bpy.types.Context) -> str:
     return "Back from Stage" if stage is not None and context.scene == stage else "Go to Stage"
 
 
+def _active_object(context: bpy.types.Context):
+    return getattr(context, "active_object", None)
+
+
+def _has_materials(context: bpy.types.Context) -> bool:
+    obj = _active_object(context)
+    return bool(obj and obj.material_slots)
+
+
+def _has_data(context: bpy.types.Context) -> bool:
+    obj = _active_object(context)
+    return bool(obj and obj.data is not None)
+
+
+def _is_light(context: bpy.types.Context) -> bool:
+    obj = _active_object(context)
+    return bool(obj and obj.type == 'LIGHT')
+
+
+def _is_collection_instance(context: bpy.types.Context) -> bool:
+    obj = _active_object(context)
+    return bool(obj and obj.instance_type == 'COLLECTION' and obj.instance_collection)
+
+
 class Action(NamedTuple):
     key: str
     number: int  # stable enum value; see module docstring
     idname: str
-    label: str
+    label: str  # name in menus and the preferences
     icon: str
     group: str
-    label_fn: Optional[Callable[[bpy.types.Context], str]] = None
+    label_fn: Optional[Callable[[bpy.types.Context], str]] = None  # dynamic button text
+    text: Optional[str] = None  # shorter button text, when the pie gives the context (e.g. "X")
+    props: Tuple[Tuple[str, Any], ...] = ()  # operator options the button sets
+    show_fn: Optional[Callable[[bpy.types.Context], bool]] = None  # hide (keep the slot) when False
 
 
 GROUP_OBJECT = "Object"
@@ -48,8 +75,37 @@ GROUP_GEOMETRY_NODES = "Geometry Nodes"
 GROUP_SCENE = "Materials & Scene"
 GROUP_COLLECTIONS = "Collections"
 GROUP_STAGE = "Collection Stage"
+GROUP_TRANSFORM = "Transform"
+GROUP_SELECT_OBJECT = "Select (Object Mode)"
+GROUP_SELECT_MESH = "Select (Edit Mesh)"
 
-GROUPS = (GROUP_OBJECT, GROUP_GEOMETRY_NODES, GROUP_SCENE, GROUP_COLLECTIONS, GROUP_STAGE)
+GROUPS = (
+    GROUP_OBJECT, GROUP_GEOMETRY_NODES, GROUP_SCENE, GROUP_COLLECTIONS, GROUP_STAGE,
+    GROUP_TRANSFORM, GROUP_SELECT_OBJECT, GROUP_SELECT_MESH,
+)
+
+_AXES = (("X", (True, False, False)), ("Y", (False, True, False)), ("Z", (False, False, True)))
+
+
+def _transform_actions(prefix: str, number: int, idname: str, label: str, free_icon: str):
+    """Free and X/Y/Z-constrained versions of a transform operator."""
+    actions = []
+    for offset, (axis, constraint) in enumerate(_AXES):
+        actions.append(Action(
+            f"{prefix}_{axis}", number + offset, idname, f"{label} {axis}", f"EVENT_{axis}", GROUP_TRANSFORM,
+            text=axis, props=(("constraint_axis", constraint),),
+        ))
+    actions.append(Action(prefix, number + 3, idname, label, free_icon, GROUP_TRANSFORM))
+    return tuple(actions)
+
+
+# Blender 5 split mesh.loop_multi_select(ring=...) into separate loop and ring operators.
+if "select_edge_loop_multi" in dir(bpy.ops.mesh):
+    _EDGE_LOOPS = ("mesh.select_edge_loop_multi", ())
+    _EDGE_RINGS = ("mesh.select_edge_ring_multi", ())
+else:
+    _EDGE_LOOPS = ("mesh.loop_multi_select", (("ring", False),))
+    _EDGE_RINGS = ("mesh.loop_multi_select", (("ring", True),))
 
 NONE_KEY = "NONE"
 
@@ -83,6 +139,33 @@ ACTIONS: Tuple[Action, ...] = (
     Action("STAGE_UPDATE", 40, "scene.update_collection_stage", "Build / Update Collection Stage", 'SCENE_DATA', GROUP_STAGE, _stage_update_label),
     Action("STAGE_SEND", 41, "object.send_collection_to_stage", "Send to Stage", 'EXPORT', GROUP_STAGE),
     Action("STAGE_TOGGLE", 42, "scene.toggle_collection_stage", "Go to / Back from Stage", 'FILE_REFRESH', GROUP_STAGE, _stage_toggle_label),
+    # Transform (axis-constrained move / rotate / scale)
+    *_transform_actions("MOVE", 50, "transform.translate", "Move", 'VIEW_PAN'),
+    *_transform_actions("ROTATE", 55, "transform.rotate", "Rotate", 'DRIVER_ROTATIONAL_DIFFERENCE'),
+    *_transform_actions("SCALE", 60, "transform.resize", "Scale", 'FULLSCREEN_ENTER'),
+    # Select (Object Mode): shown only when they apply to the active object
+    Action("SELECT_LINKED_MATERIAL", 70, "object.select_linked", "Select Linked Material", 'MATERIAL', GROUP_SELECT_OBJECT,
+           text="Material", props=(("type", 'MATERIAL'),), show_fn=_has_materials),
+    Action("SELECT_LINKED_DATA", 71, "object.select_linked", "Select Linked Object Data", 'MESH_DATA', GROUP_SELECT_OBJECT,
+           text="Object Data", props=(("type", 'OBDATA'),), show_fn=_has_data),
+    Action("SELECT_CHILDREN", 72, "object.select_grouped", "Select Children", 'CON_CHILDOF', GROUP_SELECT_OBJECT,
+           text="Children", props=(("type", 'CHILDREN_RECURSIVE'),)),
+    Action("SELECT_SAME_TYPE", 73, "object.select_grouped", "Select Same Type", 'OBJECT_DATAMODE', GROUP_SELECT_OBJECT,
+           text="Type", props=(("type", 'TYPE'),)),
+    Action("SELECT_SAME_COLOR", 74, "object.select_grouped", "Select Same Color", 'COLOR', GROUP_SELECT_OBJECT,
+           text="Color", props=(("type", 'COLOR'),)),
+    Action("SELECT_ACTIVE_CAMERA", 75, "object.select_camera", "Select Active Camera", 'CAMERA_DATA', GROUP_SELECT_OBJECT),
+    Action("SELECT_SAME_LIGHT_TYPE", 76, "object.select_grouped", "Select Same Light Type", 'LIGHT', GROUP_SELECT_OBJECT,
+           text="Light Type", props=(("type", 'LIGHT_TYPE'),), show_fn=_is_light),
+    Action("SELECT_LINKED_INSTANCE", 77, "object.select_linked", "Select Linked Instanced Collection", 'OUTLINER_OB_GROUP_INSTANCE', GROUP_SELECT_OBJECT,
+           text="Instanced Collection", props=(("type", 'DUPGROUP'),), show_fn=_is_collection_instance),
+    # Select (Edit Mesh)
+    Action("SELECT_EDGE_LOOPS", 80, _EDGE_LOOPS[0], "Select Edge Loops", 'EDGESEL', GROUP_SELECT_MESH,
+           text="Edge Loops", props=_EDGE_LOOPS[1]),
+    Action("SELECT_EDGE_RINGS", 81, _EDGE_RINGS[0], "Select Edge Rings", 'MOD_EDGESPLIT', GROUP_SELECT_MESH,
+           text="Edge Rings", props=_EDGE_RINGS[1]),
+    Action("SELECT_LESS", 82, "mesh.select_less", "Select Less", 'SELECT_SUBTRACT', GROUP_SELECT_MESH),
+    Action("SELECT_MORE", 83, "mesh.select_more", "Select More", 'SELECT_EXTEND', GROUP_SELECT_MESH),
 )
 
 ACTIONS_BY_KEY: Dict[str, Action] = {action.key: action for action in ACTIONS}
@@ -102,9 +185,19 @@ def action_enum_items():
 
 
 def draw_action(layout: bpy.types.UILayout, context: bpy.types.Context, key: str, icon: bool = True):
-    """Draw the operator button for a catalog action; returns the operator properties or None."""
+    """Draw the operator button for a catalog action.
+
+    Returns the operator properties, or None when nothing was drawn (unknown key, or an
+    action that doesn't apply right now); pies then draw a separator to keep the slot.
+    """
     action = ACTIONS_BY_KEY.get(key)
-    if action is None:
+    if action is None or (action.show_fn is not None and not action.show_fn(context)):
         return None
-    text = action.label_fn(context) if action.label_fn else action.label
-    return layout.operator(action.idname, text=text, icon=action.icon if icon else 'NONE')
+    if action.label_fn is not None:
+        text = action.label_fn(context)
+    else:
+        text = action.text or action.label
+    op = layout.operator(action.idname, text=text, icon=action.icon if icon else 'NONE')
+    for name, value in action.props:
+        setattr(op, name, value)
+    return op

@@ -1,5 +1,5 @@
 import bpy
-"""Utility functions for the Custom Utilities Blender addon.
+"""Utility functions for the EV Toolkit Blender addon.
 
 This module encapsulates shared functionality used by operators, such as
 measuring distances, handling mouse clicks/raycast, transformation clipboard

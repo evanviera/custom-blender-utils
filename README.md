@@ -1,6 +1,7 @@
-# Custom Utilities (Blender Addon)
+# EV Toolkit (Blender Addon)
 
-A curated set of everyday operators for modeling and scene management:
+Everyday modeling, selection and scene-management tools, with configurable pie menus
+(formerly “Custom Utilities”; it also replaces the older “Custom Pie Menus” / ev_pies addon):
 
 - Measure surface point distance from active camera
 - Copy/Paste/Clear transformations (with light/camera extras)
@@ -13,27 +14,29 @@ A curated set of everyday operators for modeling and scene management:
 - Collection Stage: a dedicated scene with every asset collection laid out in its
   own spot for editing, without moving any instance in any scene or file
 - Copy the current scene's Render Properties to all other scenes
+- Pie menus for axis-constrained Move / Rotate / Scale (G / R / S) and for
+  selection (D: select linked in Object Mode, edge loops/rings in Edit Mode)
 
 ## Install
 
-This is a Blender extension (4.5+). The addon lives in `custom_blender_utils/`
+This is a Blender extension (4.5+). The addon lives in `ev_toolkit/`
 with a `blender_manifest.toml`; the folder name must stay a valid Python
 identifier matching the manifest `id`, or Blender skips it.
 
 ### Local repository (development)
 
 1. Edit → Preferences → Get Extensions → Repositories (▾) → **+** → Add Local Repository.
-2. Set the directory to the root of this git repo (the folder containing `custom_blender_utils/`).
-3. Enable “Custom Utilities” under Add-ons. Edits to the source load on Blender restart
+2. Set the directory to the root of this git repo (the folder containing `ev_toolkit/`).
+3. Enable “EV Toolkit” under Add-ons. Edits to the source load on Blender restart
    or by disabling/enabling the addon.
 
 ### From zip
 
-Drag `custom-blender-utils.zip` into Blender, or Preferences → Add-ons (▾) → Install from Disk.
+Drag `ev-toolkit.zip` into Blender, or Preferences → Add-ons (▾) → Install from Disk.
 Rebuild the zip after changes:
 
 ```
-blender --command extension build --source-dir custom_blender_utils --output-filepath custom-blender-utils.zip
+blender --command extension build --source-dir ev_toolkit --output-filepath ev-toolkit.zip
 ```
 
 ## Usage
@@ -43,15 +46,27 @@ blender --command extension build --source-dir custom_blender_utils --output-fil
 - Collections menu: 3D View → Header → Collections
 - Collections pie: press `C` in Object Mode to open “Collections Pie”
   (circle select stays on `C` in other modes)
+- Move / Rotate / Scale pies: `G` / `R` / `S` in Object Mode and mesh Edit Mode
+- Select Linked pie: `D` in Object Mode; Select Loops pie: `D` in mesh Edit Mode
+
+### Moving from Custom Utilities / ev_pies
+- The extension id changed (`custom_blender_utils` → `ev_toolkit`), so Blender sees
+  a new addon: disable the old “Custom Utilities” entry if it still shows, enable
+  “EV Toolkit”, and set your pie layouts and tool defaults again.
+- Disable or remove the old “Custom Pie Menus” (ev_pies) addon. Its pies are all
+  here, and it also replaced Blender's own Select Active Camera operator.
 
 ### Preferences
-Edit → Preferences → Add-ons → Custom Utilities. Four tabs:
+Edit → Preferences → Add-ons → EV Toolkit. Four tabs:
 
-- **Pie Menus**: both pies laid out as a 3×3 grid matching the pie. Pick any
-  addon action (or Empty) for each of the eight directions; the same action can
-  go in both pies. Per pie: hotkey (key, modifiers, on/off, restore, using
-  Blender's keymap editor, so changes save with your keymap), Icons on/off,
-  Reset (default layout) and Clear. A collapsible box shows Blender's own pie
+- **Pie Menus**: every pie, grouped by the modes its hotkey works in. Each row
+  shows the pie's hotkey and an on/off switch per mode (e.g. turn the G/R/S
+  pies off to get Blender's plain transform keys back); expand it for the
+  layout, a 3×3 grid matching the pie. Pick any addon action (or Empty) for
+  each of the eight directions; the same action can go in several pies. Per
+  pie: hotkey (key, modifiers, on/off, restore, using Blender's keymap editor,
+  so changes save with your keymap), Icons on/off, Reset (default layout) and
+  Clear. A collapsible box shows Blender's own pie
   settings (radius, thresholds, timeouts); those affect every pie in Blender.
 - **Interface**: show or hide the Utilities and Collections header menus, the
   Copy Render Settings button in Render Properties, and Send to Stage in the
@@ -162,6 +177,20 @@ also in a collection outside it, an object parented to one outside it, an
 animated location on a top-level object, a child collection shown on its own
 in another scene, or a library-linked collection. Edit Collection on an instance
 now shows the collection at its stage spot.
+
+### Select & Transform Pies
+- **Move / Rotate / Scale** (`G` / `R` / `S`, Object Mode and mesh Edit Mode):
+  X, Y and Z constrain to that axis; the top slot transforms freely. These
+  replace Blender's G/R/S keys while their hotkeys are on.
+- **Select Linked** (`D`, Object Mode): Material, Object Data, Children
+  (recursive), Same Type, Same Color, Active Camera, Same Light Type and
+  Instanced Collection. Options that don't apply to the active object (no
+  materials, not a light, not a collection instance) are hidden, keeping
+  their slot.
+- **Select Loops** (`D`, mesh Edit Mode): Edge Loops and Edge Rings from the
+  selected edges, Select Less, Select More.
+
+All of these are ordinary actions too: put any of them in any pie slot.
 
 ### Transformations Clipboard
 - Copy from selected: Utilities → “Copy Transformations”.

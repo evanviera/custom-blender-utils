@@ -1,5 +1,5 @@
 import bpy
-"""Operators for the Custom Utilities Blender addon.
+"""Operators for the EV Toolkit Blender addon.
 
 This module defines all operator classes exposed by the addon. Operators here
 focus on discrete actions such as measuring, copying/pasting transformations,

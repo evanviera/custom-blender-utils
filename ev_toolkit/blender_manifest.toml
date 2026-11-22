@@ -1,14 +1,14 @@
 schema_version = "1.0.0"
 
 # The directory name must match this id for Blender to load it from a local repository.
-id = "custom_blender_utils"
-version = "0.4.0"
-name = "Custom Utilities"
-tagline = "Everyday operators for modeling and scene management"
+id = "ev_toolkit"
+version = "0.5.0"
+name = "EV Toolkit"
+tagline = "Everyday modeling and scene tools with configurable pie menus"
 maintainer = "Evan Viera"
 type = "add-on"
 
-tags = ["User Interface", "Object", "Geometry Nodes"]
+tags = ["User Interface", "Object", "Mesh", "Geometry Nodes"]
 
 blender_version_min = "4.5.0"
 
