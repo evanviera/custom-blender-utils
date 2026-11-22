@@ -14,6 +14,7 @@ Everyday modeling, selection and scene-management tools, with configurable pie m
 - Collection Stage: a dedicated scene with every asset collection laid out in its
   own spot for editing, without moving any instance in any scene or file
 - Copy the current scene's Render Properties to all other scenes
+- Scale Proxy: rescale (and turn) a whole scene around a true-size 6 ft proxy character
 - Pie menus for axis-constrained Move / Rotate / Scale (G / R / S) and for
   selection (D: select linked in Object Mode, edge loops/rings in Edit Mode)
 
@@ -49,6 +50,26 @@ blender --command extension build --source-dir ev_toolkit --output-filepath ev-t
 - Move / Rotate / Scale pies: `G` / `R` / `S` in Object Mode and mesh Edit Mode
 - Select Linked pie: `D` in Object Mode; Select Loops pie: `D` in mesh Edit Mode
 
+### Scale Proxy (fix a scene's scale against a person)
+1. Utilities → **Add Scale Proxy**: a 6 ft (1.8288 m) mannequin appears at the 3D cursor,
+   facing -Y. Its scale 1 is its true height.
+2. Move, rotate and scale the proxy until it looks right in the scene (standing in a
+   doorway, next to a table...).
+3. Utilities → **Apply Scale Proxy**: every object in the view layer takes the opposite
+   change and the proxy goes back to its true size, so what you saw stays the same but
+   the scene is now at real-world scale. Scaling the proxy 2× halves the scene; turning it
+   90° turns the scene -90° (about the proxy).
+   - Redo panel: apply Location / Rotation / Scale. With Location off, the scene pivots on
+     the proxy's feet instead of being carried back to where the proxy was placed.
+     Uniform (Height) scales evenly by the proxy's Z scale.
+   - Adjust Cameras & Lights scales clipping, focus distance and ortho scale, plus light
+     power (inverse square) and point/spot radius, so renders match.
+   - Follow in Viewport moves the 3D Views too, so the picture doesn't jump.
+   - Keep Proxy leaves it in place for another pass; **Remove Scale Proxy** deletes it.
+   - Only roots move (children follow); objects in excluded collections (instance
+     sources) are left alone, so instances don't move twice. Animated transforms keep
+     their keys and are reported.
+
 ### Moving from Custom Utilities / ev_pies
 - The extension id changed (`custom_blender_utils` → `ev_toolkit`), so Blender sees
   a new addon: disable the old “Custom Utilities” entry if it still shows, enable
@@ -73,7 +94,8 @@ Edit → Preferences → Add-ons → EV Toolkit. Four tabs:
   Outliner's collection menu.
 - **Tools**: the options tools start with: Measure (decimal places, copy to
   clipboard), Geometry Nodes (paste excludes active, import attaches to active,
-  export folder), Copy Render Settings (include output).
+  export folder), Copy Render Settings (include output), Scale Proxy (height,
+  uniform scale, cameras & lights, follow viewport, keep proxy).
 - **Collections**: the options collection tools start with (Decompose nested
   instances, Replace with Instance pivot and top-level, Reset Anchor anchor) and
   the Collection Stage: scene name, Update/Send options, and the layout a new

@@ -2,7 +2,7 @@ schema_version = "1.0.0"
 
 # The directory name must match this id for Blender to load it from a local repository.
 id = "ev_toolkit"
-version = "0.5.0"
+version = "0.6.0"
 name = "EV Toolkit"
 tagline = "Everyday modeling and scene tools with configurable pie menus"
 maintainer = "Evan Viera"

@@ -396,6 +396,34 @@ class EVToolkitPreferences(bpy.types.AddonPreferences):
         default=False,
     )
 
+    # Tools: Scale Proxy
+    scale_proxy_height: FloatProperty(
+        name="Proxy Height",
+        description="True height of the proxy character Add Scale Proxy creates (6 ft by default)",
+        default=fn.SCALE_PROXY_DEFAULT_HEIGHT, min=0.01, soft_max=10.0,
+        unit='LENGTH', precision=4,
+    )
+    scale_proxy_uniform: BoolProperty(
+        name="Uniform Scale (Height)",
+        description="Apply Scale Proxy scales the scene evenly by the proxy's height (Z scale)",
+        default=True,
+    )
+    scale_proxy_adjust_data: BoolProperty(
+        name="Adjust Cameras & Lights",
+        description="Apply Scale Proxy also scales camera clipping/focus and light power/radius",
+        default=True,
+    )
+    scale_proxy_follow_view: BoolProperty(
+        name="Follow in Viewport",
+        description="Apply Scale Proxy moves the 3D Views with the scene so the picture stays the same",
+        default=True,
+    )
+    scale_proxy_keep: BoolProperty(
+        name="Keep Proxy",
+        description="Apply Scale Proxy keeps the proxy (back at true size) instead of deleting it",
+        default=True,
+    )
+
     # Collections: collection tools
     decompose_nested: BoolProperty(
         name="Decompose: Nested Instances",
@@ -619,6 +647,13 @@ class EVToolkitPreferences(bpy.types.AddonPreferences):
 
         col = self._section(layout, "Copy Render Settings to All Scenes", 'SCENE_DATA')
         col.prop(self, "render_include_output")
+
+        col = self._section(layout, "Scale Proxy", 'ARMATURE_DATA')
+        col.prop(self, "scale_proxy_height")
+        col.prop(self, "scale_proxy_uniform")
+        col.prop(self, "scale_proxy_adjust_data")
+        col.prop(self, "scale_proxy_follow_view")
+        col.prop(self, "scale_proxy_keep")
 
     def _draw_collections(self, context, layout):
         layout.label(text="Options each tool starts with. The redo panel still changes them for one run.", icon='INFO')

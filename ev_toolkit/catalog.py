@@ -33,6 +33,14 @@ def _stage_toggle_label(context: bpy.types.Context) -> str:
     return "Back from Stage" if stage is not None and context.scene == stage else "Go to Stage"
 
 
+def _scale_proxy_label(context: bpy.types.Context) -> str:
+    return "Apply Scale Proxy" if fn.get_scale_proxy(context) is not None else "Add Scale Proxy"
+
+
+def _has_scale_proxy(context: bpy.types.Context) -> bool:
+    return fn.get_scale_proxy(context) is not None
+
+
 def _active_object(context: bpy.types.Context):
     return getattr(context, "active_object", None)
 
@@ -126,6 +134,9 @@ ACTIONS: Tuple[Action, ...] = (
     Action("REMOVE_DUPLICATE_MATERIALS", 20, "object.remove_duplicate_materials", "Remove Duplicate Materials", 'MATERIAL', GROUP_SCENE),
     Action("RELOAD_IMAGES", 21, "image.reload_all_images", "Reload All Images", 'IMAGE_DATA', GROUP_SCENE),
     Action("COPY_RENDER_SETTINGS", 22, "scene.copy_render_settings_to_all_scenes", "Copy Render Settings to All Scenes", 'SCENE_DATA', GROUP_SCENE),
+    Action("SCALE_PROXY", 23, "object.world_scale_proxy", "Add / Apply Scale Proxy", 'ARMATURE_DATA', GROUP_SCENE, _scale_proxy_label),
+    Action("SCALE_PROXY_REMOVE", 24, "object.world_scale_proxy_remove", "Remove Scale Proxy", 'X', GROUP_SCENE,
+           show_fn=_has_scale_proxy),
     # Collections
     Action("EDIT_COLLECTION", 30, "collection.edit_instanced_collection", "Edit / Close Collection", 'OUTLINER_COLLECTION', GROUP_COLLECTIONS, _edit_collection_label),
     Action("DUPLICATE_COLLECTION", 31, "object.duplicate_instanced_collection", "Duplicate Collection", 'DUPLICATE', GROUP_COLLECTIONS),

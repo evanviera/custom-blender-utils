@@ -9,7 +9,7 @@ import importlib
 bl_info = {
     "name": "EV Toolkit",
     "author": "Evan Viera",
-    "version": (0, 5, 0),
+    "version": (0, 6, 0),
     "blender": (4, 5, 0),
     "location": "3D View > Header menus (Utilities, Collections) and pie menus: V Utilities, C Collections, D Select, G/R/S Move/Rotate/Scale",
     "description": "Everyday modeling, selection and scene-management tools with configurable pie menus.",

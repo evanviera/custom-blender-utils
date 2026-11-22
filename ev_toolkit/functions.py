@@ -3372,3 +3372,311 @@ def update_collection_stage(
             if a[0] < b[2] - 1e-4 and b[0] < a[2] - 1e-4 and a[1] < b[3] - 1e-4 and b[1] < a[3] - 1e-4:
                 report["overlaps"].append((name_a, name_b))
     return report
+
+
+# ---------------------------------------------------------------------------
+# World Scale Proxy: a true-size stand-in character. The user transforms it until it looks
+# right against the world, then the world takes the inverse of that change and the proxy
+# goes back to how it was placed, so the visual relationship stays and the proxy's size
+# (scale 1 = its real height) becomes true for the whole scene.
+# ---------------------------------------------------------------------------
+
+SCALE_PROXY_KEY = "ev_scale_proxy_rest"  # [x, y, z, qw, qx, qy, qz]: the pose it was placed in
+SCALE_PROXY_HEIGHT_KEY = "ev_scale_proxy_height"
+SCALE_PROXY_NAME = "Scale Proxy"
+SCALE_PROXY_MATERIAL = "EV Scale Proxy"
+SCALE_PROXY_DEFAULT_HEIGHT = 1.8288  # 6 ft
+
+# Mannequin parts at roughly 1.83 m, facing -Y (Blender's front). Ellipsoids are
+# (center, radii); limbs are (start, end, radius x, radius y). The finished mesh is
+# rescaled to the exact height asked for, with the soles at z = 0.
+_PROXY_ELLIPSOIDS = (
+    ((0.0, 0.0, 1.70), (0.085, 0.10, 0.12)),      # head
+    ((0.0, -0.10, 1.69), (0.018, 0.03, 0.025)),   # nose, so the facing reads
+    ((0.0, 0.0, 1.33), (0.19, 0.115, 0.19)),      # chest
+    ((0.0, 0.0, 1.10), (0.155, 0.10, 0.14)),      # abdomen
+    ((0.0, 0.0, 0.95), (0.17, 0.11, 0.11)),       # pelvis
+)
+_PROXY_SIDE_ELLIPSOIDS = (
+    ((0.29, -0.015, 0.83), (0.025, 0.045, 0.075)),  # hand
+    ((0.11, -0.05, 0.04), (0.045, 0.12, 0.04)),     # foot
+)
+_PROXY_LIMBS = (
+    ((0.0, 0.0, 1.50), (0.0, 0.0, 1.62), 0.05, 0.05),  # neck
+)
+_PROXY_SIDE_LIMBS = (
+    ((0.20, 0.0, 1.45), (0.25, 0.0, 1.17), 0.05, 0.05),      # upper arm
+    ((0.25, 0.0, 1.17), (0.28, -0.01, 0.92), 0.042, 0.042),  # forearm
+    ((0.10, 0.0, 0.92), (0.11, 0.0, 0.50), 0.075, 0.075),    # thigh
+    ((0.11, 0.0, 0.50), (0.11, 0.01, 0.09), 0.055, 0.055),   # shin
+)
+
+
+def build_scale_proxy_mesh(height: float, name: str = SCALE_PROXY_NAME) -> bpy.types.Mesh:
+    """A simple mannequin mesh exactly `height` tall, origin between the feet."""
+    import bmesh
+
+    bm = bmesh.new()
+
+    def ellipsoid(center, radii, rotation=None):
+        matrix = Matrix.Translation(Vector(center))
+        if rotation is not None:
+            matrix = matrix @ rotation.to_matrix().to_4x4()
+        matrix = matrix @ Matrix.Diagonal((*radii, 1.0))
+        bmesh.ops.create_uvsphere(bm, u_segments=16, v_segments=10, radius=1.0, matrix=matrix)
+
+    def limb(start, end, rx, ry):
+        a, b = Vector(start), Vector(end)
+        axis = b - a
+        rotation = Vector((0.0, 0.0, 1.0)).rotation_difference(axis.normalized())
+        ellipsoid((a + b) / 2.0, (rx, ry, axis.length * 0.56), rotation)
+
+    def mirrored(point):
+        return (-point[0], point[1], point[2])
+
+    for center, radii in _PROXY_ELLIPSOIDS:
+        ellipsoid(center, radii)
+    for center, radii in _PROXY_SIDE_ELLIPSOIDS:
+        ellipsoid(center, radii)
+        ellipsoid(mirrored(center), radii)
+    for start, end, rx, ry in _PROXY_LIMBS:
+        limb(start, end, rx, ry)
+    for start, end, rx, ry in _PROXY_SIDE_LIMBS:
+        limb(start, end, rx, ry)
+        limb(mirrored(start), mirrored(end), rx, ry)
+
+    low = min(v.co.z for v in bm.verts)
+    high = max(v.co.z for v in bm.verts)
+    factor = height / (high - low)
+    for vert in bm.verts:
+        vert.co.z -= low
+        vert.co *= factor
+    for face in bm.faces:
+        face.smooth = True
+
+    mesh = bpy.data.meshes.new(name)
+    bm.to_mesh(mesh)
+    bm.free()
+    return mesh
+
+
+def _scale_proxy_material() -> bpy.types.Material:
+    mat = bpy.data.materials.get(SCALE_PROXY_MATERIAL)
+    if mat is not None and mat.library is None:
+        return mat
+    mat = bpy.data.materials.new(SCALE_PROXY_MATERIAL)
+    color = (1.0, 0.42, 0.05, 1.0)
+    mat.diffuse_color = color  # solid-mode viewport color
+    mat.use_nodes = True
+    bsdf = next((n for n in mat.node_tree.nodes if n.type == 'BSDF_PRINCIPLED'), None)
+    if bsdf is not None:
+        bsdf.inputs["Base Color"].default_value = color
+        bsdf.inputs["Roughness"].default_value = 0.6
+    return mat
+
+
+def is_scale_proxy(obj: Optional[bpy.types.Object]) -> bool:
+    return obj is not None and SCALE_PROXY_KEY in obj.keys()
+
+
+def get_scale_proxy(context: bpy.types.Context) -> Optional[bpy.types.Object]:
+    """The scene's scale proxy: the active object if it is one, else the first found."""
+    active = getattr(context, "active_object", None)
+    if is_scale_proxy(active) and context.scene in active.users_scene:
+        return active
+    scene = context.scene
+    if scene is None:
+        return None
+    return next((obj for obj in scene.objects if is_scale_proxy(obj)), None)
+
+
+def add_scale_proxy(context: bpy.types.Context, height: float) -> bpy.types.Object:
+    """Create the proxy at the 3D cursor, in the scene's root collection, selected and active."""
+    scene = context.scene
+    mesh = build_scale_proxy_mesh(height)
+    mesh.materials.append(_scale_proxy_material())
+    obj = bpy.data.objects.new(SCALE_PROXY_NAME, mesh)
+    scene.collection.objects.link(obj)
+    location = scene.cursor.location.copy()
+    obj.location = location
+    obj[SCALE_PROXY_KEY] = [*location, 1.0, 0.0, 0.0, 0.0]
+    obj[SCALE_PROXY_HEIGHT_KEY] = height
+    obj.color = (1.0, 0.42, 0.05, 1.0)
+
+    for other in context.selected_objects:
+        other.select_set(False)
+    obj.select_set(True)
+    context.view_layer.objects.active = obj
+    return obj
+
+
+def remove_scale_proxy(proxy: bpy.types.Object) -> None:
+    """Delete the proxy, its mesh, and the proxy material once nothing uses it."""
+    mesh = proxy.data
+    bpy.data.objects.remove(proxy, do_unlink=True)
+    if mesh is not None and mesh.users == 0:
+        bpy.data.meshes.remove(mesh)
+    mat = bpy.data.materials.get(SCALE_PROXY_MATERIAL)
+    if mat is not None and mat.users == 0:
+        bpy.data.materials.remove(mat)
+
+
+def scale_proxy_rest(proxy: bpy.types.Object) -> Tuple[Vector, Quaternion]:
+    """Where the proxy was placed (location, rotation). Its rest scale is always 1."""
+    values = list(proxy.get(SCALE_PROXY_KEY, ()))
+    if len(values) != 7:
+        return proxy.matrix_world.to_translation(), Quaternion()
+    return Vector(values[:3]), Quaternion(values[3:]).normalized()
+
+
+def scale_proxy_delta(
+    proxy: bpy.types.Object,
+    use_location: bool,
+    use_rotation: bool,
+    use_scale: bool,
+    uniform: bool,
+) -> Tuple[Matrix, float]:
+    """The world-space change from the proxy's rest pose to its current pose.
+
+    Returns (D, factor): D maps rest to current for the enabled parts, pivoting on the
+    proxy's current position. With location off, the world rotates/scales about where the
+    proxy stands now instead of being carried back to where it was placed. `factor` is
+    the proxy's size change (uniform part), so the world is scaled by 1 / factor.
+    """
+    rest_loc, rest_rot = scale_proxy_rest(proxy)
+    loc, rot, scale = proxy.matrix_world.decompose()
+
+    target_rot = rot if use_rotation else rest_rot
+    if not use_scale:
+        target_scale = Vector((1.0, 1.0, 1.0))
+    elif uniform:
+        target_scale = Vector((scale.z,) * 3)  # the height axis sets the size
+    else:
+        target_scale = scale.copy()
+    base_loc = rest_loc if use_location else loc
+
+    current = Matrix.LocRotScale(loc, target_rot, target_scale)
+    rest = Matrix.LocRotScale(base_loc, rest_rot, Vector((1.0, 1.0, 1.0)))
+    factor = abs(target_scale.x * target_scale.y * target_scale.z) ** (1.0 / 3.0)
+    return current @ rest.inverted_safe(), factor
+
+
+def _scale_camera_data(cam: bpy.types.Camera, w: float) -> None:
+    """Distances render ignores the camera object's scale for."""
+    cam.clip_start *= w
+    cam.clip_end *= w
+    cam.ortho_scale *= w
+    cam.dof.focus_distance *= w
+
+
+def _scale_light_data(light: bpy.types.Light, w: float) -> None:
+    """Keep the same illumination when every distance changes by w (inverse-square falloff).
+    Area light size follows the object's scale; point and spot radius don't."""
+    if light.type == 'SUN':
+        return
+    light.energy *= w * w
+    if light.type in {'POINT', 'SPOT'}:
+        light.shadow_soft_size *= w
+    if hasattr(light, "cutoff_distance"):
+        light.cutoff_distance *= w
+
+
+def transform_view(r3d, inverse: Matrix, w: float) -> None:
+    """Move a 3D View's eye by `inverse` so it shows the transformed world as it showed the old."""
+    rot = inverse.decompose()[1]
+    r3d.view_location = inverse @ r3d.view_location
+    r3d.view_rotation = (rot @ r3d.view_rotation).normalized()
+    r3d.view_distance *= w
+
+
+def view_state(r3d) -> Tuple[Vector, Quaternion, float]:
+    return r3d.view_location.copy(), r3d.view_rotation.copy(), r3d.view_distance
+
+
+def set_view_state(r3d, state: Tuple[Vector, Quaternion, float]) -> None:
+    r3d.view_location, r3d.view_rotation, r3d.view_distance = state
+
+
+def view_states_match(a, b, tolerance: float = 1e-4) -> bool:
+    return (
+        (a[0] - b[0]).length <= tolerance * max(1.0, a[0].length)
+        and a[1].rotation_difference(b[1]).angle <= tolerance
+        and abs(a[2] - b[2]) <= tolerance * max(1.0, abs(a[2]))
+    )
+
+
+def apply_world_transform(
+    context: bpy.types.Context,
+    proxy: bpy.types.Object,
+    inverse: Matrix,
+    w: float,
+    adjust_data: bool,
+) -> Dict[str, Any]:
+    """Transform every object in the view layer except the proxy by `inverse` (world space).
+
+    Only roots move (objects whose parent isn't moving); children follow. Objects in
+    excluded collections (e.g. the sources of collection instances) are not in the view
+    layer and are left alone, so instances move once. With `adjust_data`, cameras and
+    lights get the distances their object scale doesn't cover scaled by `w`.
+    """
+    view_layer = context.view_layer
+    skip = {proxy.as_pointer()}
+    skip.update(child.as_pointer() for child in proxy.children_recursive)
+    moving = [obj for obj in view_layer.objects if obj.as_pointer() not in skip and not is_scale_proxy(obj)]
+    moving_ptrs = {obj.as_pointer() for obj in moving}
+
+    report = {
+        "moved": 0, "linked": [], "animated": 0, "approximated": 0,
+        "shared": set(), "double": set(), "cameras": 0, "lights": 0,
+    }
+
+    for obj in moving:
+        parent = obj.parent
+        if parent is not None and parent.as_pointer() in moving_ptrs:
+            continue
+        if obj.library is not None and obj.override_library is None:
+            report["linked"].append(obj.name)
+            continue
+        if parent is None:
+            target = inverse @ obj.matrix_basis
+            loc, rot, scale = target.decompose()
+            obj.matrix_basis = Matrix.LocRotScale(loc, rot, scale)
+        else:
+            target = inverse @ obj.matrix_world
+            obj.matrix_world = target
+        if not _is_loc_rot_scale(target):
+            report["approximated"] += 1
+        if _has_animated_transform(obj):
+            report["animated"] += 1
+        report["moved"] += 1
+
+    scene = context.scene
+    for obj in moving:
+        for other in obj.users_scene:
+            if other != scene:
+                report["shared"].add(other.name)
+
+    # Objects both shown directly and inside a collection an instance here shows move twice
+    # inside that instance (once with the instancer, once themselves).
+    for obj in moving:
+        coll = get_instanced_collection(obj)
+        if coll is None:
+            continue
+        if any(inner.as_pointer() in moving_ptrs for inner in coll.all_objects):
+            report["double"].add(coll.name)
+
+    if adjust_data and abs(w - 1.0) > 1e-9:
+        seen = set()
+        for obj in moving:
+            data = obj.data
+            if data is None or data.as_pointer() in seen or data.library is not None:
+                continue
+            if obj.type == 'CAMERA':
+                seen.add(data.as_pointer())
+                _scale_camera_data(data, w)
+                report["cameras"] += 1
+            elif obj.type == 'LIGHT':
+                seen.add(data.as_pointer())
+                _scale_light_data(data, w)
+                report["lights"] += 1
+    return report

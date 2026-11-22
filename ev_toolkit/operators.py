@@ -8,7 +8,10 @@ cleaning materials, changing origins, and moving objects between collections.
 
 import json
 
-from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty, CollectionProperty
+import math
+
+from bpy.props import StringProperty, EnumProperty, IntProperty, BoolProperty, CollectionProperty, FloatProperty
+from mathutils import Matrix
 
 from . import functions as fn
 from . import preferences as prefs_mod
@@ -2190,6 +2193,239 @@ class ToggleCollectionStageOperator(bpy.types.Operator):
         window.scene = back
         return {'FINISHED'}
 
+# Views moved by the last Apply Scale Proxy, so a redo (which undoes the scene but not the
+# views) can put them back first: {"proxy": matrix before, "views": {r3d pointer: (before, after)}}.
+_SCALE_PROXY_VIEWS = {}
+
+
+def _scale_proxy_regions(context: bpy.types.Context):
+    screen = context.screen
+    if screen is None:
+        return []
+    regions = []
+    for area in screen.areas:
+        if area.type != 'VIEW_3D':
+            continue
+        space = area.spaces.active
+        if space.region_3d is not None:
+            regions.append(space.region_3d)
+        regions.extend(r for r in space.region_quadviews if r is not None)
+    return regions
+
+
+def _matrices_close(a, b, tolerance: float = 1e-5) -> bool:
+    return all(abs(a[r][c] - b[r][c]) <= tolerance for r in range(4) for c in range(4))
+
+
+class WorldScaleProxyOperator(bpy.types.Operator):
+    bl_idname = "object.world_scale_proxy"
+    bl_label = "Scale World to Proxy"
+    bl_description = (
+        "First run: add a true-size proxy character at the 3D cursor. Move, rotate and scale it "
+        "until it looks right against the scene, then run again: the scene takes the opposite "
+        "change and the proxy returns to its true size, keeping what you saw"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    step: EnumProperty(
+        items=[('ADD', "Add", ""), ('APPLY', "Apply", "")],
+        default='ADD',
+        options={'HIDDEN', 'SKIP_SAVE'},
+    )
+    height: FloatProperty(
+        name="Height",
+        description="The proxy's true height (6 ft by default)",
+        default=fn.SCALE_PROXY_DEFAULT_HEIGHT, min=0.01, soft_max=10.0,
+        unit='LENGTH', precision=4,
+        options={'SKIP_SAVE'},
+    )
+    use_location: BoolProperty(
+        name="Location",
+        description=(
+            "Carry the scene so the spot the proxy stands on comes back to where it was placed. "
+            "Off: the scene rotates and scales about the proxy's feet and the proxy stays there"
+        ),
+        default=True, options={'SKIP_SAVE'},
+    )
+    use_rotation: BoolProperty(
+        name="Rotation",
+        description="Turn the scene by the opposite of the proxy's rotation",
+        default=True, options={'SKIP_SAVE'},
+    )
+    use_scale: BoolProperty(
+        name="Scale",
+        description="Scale the scene by the opposite of the proxy's scale",
+        default=True, options={'SKIP_SAVE'},
+    )
+    uniform_scale: BoolProperty(
+        name="Uniform (Height)",
+        description=(
+            "Scale the scene evenly by the proxy's height (its Z scale). Off: use the proxy's "
+            "scale on each axis, which can't be held exactly by rotated objects"
+        ),
+        default=True, options={'SKIP_SAVE'},
+    )
+    adjust_data: BoolProperty(
+        name="Adjust Cameras & Lights",
+        description=(
+            "Scale camera clipping, focus distance and ortho scale, and light power (inverse "
+            "square) and point/spot radius, so renders look the same at the new size"
+        ),
+        default=True, options={'SKIP_SAVE'},
+    )
+    follow_view: BoolProperty(
+        name="Follow in Viewport",
+        description="Move the 3D Views with the scene, so the picture stays the same",
+        default=True, options={'SKIP_SAVE'},
+    )
+    keep_proxy: BoolProperty(
+        name="Keep Proxy",
+        description="Keep the proxy after applying, back at its true size, to check or adjust again",
+        default=True, options={'SKIP_SAVE'},
+    )
+
+    _PREF_DEFAULTS = {
+        "height": "scale_proxy_height",
+        "uniform_scale": "scale_proxy_uniform",
+        "adjust_data": "scale_proxy_adjust_data",
+        "follow_view": "scale_proxy_follow_view",
+        "keep_proxy": "scale_proxy_keep",
+    }
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and context.scene is not None and context.view_layer is not None
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.use_property_decorate = False
+        if self.step == 'ADD':
+            layout.prop(self, "height")
+            return
+        col = layout.column(heading="Apply")
+        col.prop(self, "use_location")
+        col.prop(self, "use_rotation")
+        col.prop(self, "use_scale")
+        sub = col.column()
+        sub.active = self.use_scale
+        sub.prop(self, "uniform_scale")
+        col = layout.column(heading="Options")
+        col.prop(self, "adjust_data")
+        col.prop(self, "follow_view")
+        col.prop(self, "keep_proxy")
+
+    def execute(self, context):
+        prefs_mod.apply_operator_defaults(self, context, self._PREF_DEFAULTS)
+        proxy = fn.get_scale_proxy(context)
+        if proxy is None:
+            self.step = 'ADD'
+            fn.add_scale_proxy(context, self.height)
+            self.report(
+                {'INFO'},
+                "Added Scale Proxy at the 3D cursor. Move, rotate and scale it to fit the scene, "
+                "then run Apply Scale Proxy",
+            )
+            return {'FINISHED'}
+        self.step = 'APPLY'
+        return self._apply(context, proxy)
+
+    def _apply(self, context, proxy):
+        global _SCALE_PROXY_VIEWS
+        if not (self.use_location or self.use_rotation or self.use_scale):
+            self.report({'WARNING'}, "Nothing to apply: enable Location, Rotation and/or Scale")
+            return {'CANCELLED'}
+
+        before = proxy.matrix_world.copy()
+        regions = _scale_proxy_regions(context)
+
+        # A redo undid the scene but not the views: put the views back where they were.
+        last = _SCALE_PROXY_VIEWS
+        _SCALE_PROXY_VIEWS = {}
+        if last and _matrices_close(last["proxy"], before):
+            for r3d in regions:
+                states = last["views"].get(r3d.as_pointer())
+                if states is not None and fn.view_states_match(fn.view_state(r3d), states[1]):
+                    fn.set_view_state(r3d, states[0])
+
+        delta, factor = fn.scale_proxy_delta(
+            proxy, self.use_location, self.use_rotation, self.use_scale, self.uniform_scale
+        )
+        if factor < 1e-6:
+            self.report({'ERROR'}, "The proxy is scaled to zero; can't scale the scene by that")
+            return {'CANCELLED'}
+        if fn._is_identity(delta):
+            self.report({'INFO'}, "The proxy is at its true size and pose: nothing to apply")
+            return {'CANCELLED'}
+
+        inverse = delta.inverted_safe()
+        w = 1.0 / factor
+        result = fn.apply_world_transform(context, proxy, inverse, w, self.adjust_data)
+
+        loc, rot, scale = (inverse @ before).decompose()
+        proxy.matrix_world = Matrix.LocRotScale(loc, rot, scale)
+
+        if self.follow_view:
+            views = {}
+            for r3d in regions:
+                old = fn.view_state(r3d)
+                fn.transform_view(r3d, inverse, w)
+                views[r3d.as_pointer()] = (old, fn.view_state(r3d))
+            _SCALE_PROXY_VIEWS = {"proxy": before, "views": views}
+
+        if not self.keep_proxy:
+            fn.remove_scale_proxy(proxy)
+
+        changes = []
+        if abs(w - 1.0) > 1e-6:
+            changes.append(f"scaled ×{w:.4g}")
+        angle = math.degrees(delta.decompose()[1].angle)
+        if angle > 1e-3:
+            changes.append(f"rotated {angle:.4g}°")
+        if self.use_location and (delta.to_translation()).length > 1e-6 and not changes:
+            changes.append("moved")
+        message = f"Scene {', '.join(changes) or 'moved'}: {result['moved']} object(s)"
+
+        notes = []
+        if result["cameras"] or result["lights"]:
+            notes.append(f"adjusted {result['cameras']} camera(s), {result['lights']} light(s)")
+        if result["linked"]:
+            notes.append(f"skipped linked {', '.join(result['linked'][:3])}" + (" ..." if len(result["linked"]) > 3 else ""))
+        if result["animated"]:
+            notes.append(f"{result['animated']} have animated transforms; their keys were not changed")
+        if result["approximated"]:
+            notes.append(f"{result['approximated']} can't hold non-uniform scale over rotation exactly")
+        if result["double"]:
+            notes.append(
+                "objects shown directly and inside instances of "
+                + ", ".join(sorted(result["double"])) + " moved twice there"
+            )
+        if result["shared"]:
+            notes.append("also changed in scene(s) " + ", ".join(sorted(result["shared"])))
+        if notes:
+            message += " (" + "; ".join(notes) + ")"
+        warn = result["linked"] or result["animated"] or result["approximated"] or result["double"] or result["shared"]
+        self.report({'WARNING'} if warn else {'INFO'}, message)
+        return {'FINISHED'}
+
+
+class RemoveScaleProxyOperator(bpy.types.Operator):
+    bl_idname = "object.world_scale_proxy_remove"
+    bl_label = "Remove Scale Proxy"
+    bl_description = "Delete the scale proxy without changing the scene"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.mode == 'OBJECT' and fn.get_scale_proxy(context) is not None
+
+    def execute(self, context):
+        proxies = [obj for obj in context.scene.objects if fn.is_scale_proxy(obj)]
+        for proxy in proxies:
+            fn.remove_scale_proxy(proxy)
+        self.report({'INFO'}, f"Removed {len(proxies)} scale prox{'y' if len(proxies) == 1 else 'ies'}")
+        return {'FINISHED'}
+
 
 classes = [
     CUSTOMUTILS_PG_gn_network_selection_item,
@@ -2222,6 +2458,8 @@ classes = [
     UpdateCollectionStageOperator,
     SendCollectionToStageOperator,
     ToggleCollectionStageOperator,
+    WorldScaleProxyOperator,
+    RemoveScaleProxyOperator,
 ]
 
 def register():
